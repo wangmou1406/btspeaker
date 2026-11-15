@@ -95,6 +95,14 @@ flowchart LR
 curl -fsSL https://raw.githubusercontent.com/wangmou1406/btspeaker/main/install.sh | sudo bash
 ```
 
+> **国内网络提示**：`github.com` 直连经常超时，但 `raw.githubusercontent.com` 一般可用。安装脚本下载源码包时会自动依次回退 `ghfast.top` / `ghproxy.net` / `gh-proxy.com` / `hub.gitmirror.com` 四个加速镜像，全部失败还会尝试镜像 `git clone`。如果拉取脚本本身也慢，可改用 jsDelivr 通道（可能滞后几分钟）：
+>
+> ```bash
+> curl -fsSL https://cdn.jsdelivr.net/gh/wangmou1406/btspeaker@main/install.sh | sudo bash
+> ```
+>
+> 自定义镜像见「排障 → GitHub 下载超时」。
+
 脚本会自动完成：
 
 1. 识别发行版与包管理器（apt / dnf / pacman / zypper），安装依赖：
@@ -352,6 +360,25 @@ tail -n 100 /etc/btspeaker/btspeaker.log      # 服务日志
 ```bash
 BTSPEAKER_SIM=1 python -m btspeaker serve --data-dir .btsdata --port 8722
 ```
+
+### GitHub 下载超时（国内网络）
+
+`curl: (28) Connection timed out ... github.com/.../main.tar.gz` 是典型的 GitHub 直连超时。安装脚本已内置镜像回退；也可手动指定：
+
+```bash
+# 自定义源码包地址（内网镜像 / 反代 / file://）
+curl -fsSL https://raw.githubusercontent.com/wangmou1406/btspeaker/main/install.sh \
+  | sudo env BTSPEAKER_TARBALL_URL='https://<你的镜像>/btspeaker-main.tar.gz' bash
+
+# 或只给镜像前缀（脚本会拼成 <前缀>/https://github.com/...）
+curl -fsSL https://raw.githubusercontent.com/wangmou1406/btspeaker/main/install.sh \
+  | sudo env BTSPEAKER_MIRROR='https://ghfast.top/' bash
+```
+
+仍然不行时（例如整机无法访问 GitHub）：
+1. 在能上网的机器下载源码包：`https://github.com/wangmou1406/btspeaker/archive/refs/heads/main.tar.gz`（或用上面任一镜像）；
+2. `scp btspeaker-main.tar.gz root@<目标机>:/tmp/ && ssh root@<目标机>`；
+3. `cd /tmp && tar -xzf btspeaker-main.tar.gz && cd btspeaker-main && sudo bash install.sh`（本地目录安装，不再联网）。
 
 ## 卸载
 

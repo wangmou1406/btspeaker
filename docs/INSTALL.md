@@ -84,8 +84,20 @@ curl -fsSL .../install.sh | bash -s -- --dry-run
 curl -fsSL .../install.sh | sudo bash -s -- --no-deps --optional
 ```
 
-> 单行模式要求能访问 GitHub（下载源码包）；内网环境请用「方式二」，或设置
-> `BTSPEAKER_SRC_DIR=/path/to/source` 指向本地源码目录。
+> 单行模式需要能访问 GitHub 以下载源码包。国内网络直连 `github.com` 常超时，脚本会自动依次
+> 尝试 `ghfast.top` / `ghproxy.net` / `gh-proxy.com` / `hub.gitmirror.com` 四个加速镜像，
+> 全部失败再尝试镜像 `git clone`。也可手动指定：
+>
+> ```bash
+> # 自定义源码包地址（内网镜像 / 反代 / file://）
+> curl -fsSL .../install.sh | sudo env BTSPEAKER_TARBALL_URL='https://<镜像>/btspeaker-main.tar.gz' bash
+> # 或只给镜像前缀
+> curl -fsSL .../install.sh | sudo env BTSPEAKER_MIRROR='https://ghfast.top/' bash
+> # 脚本本身也拉不到时，用 jsDelivr 通道（可能滞后几分钟）
+> curl -fsSL https://cdn.jsdelivr.net/gh/wangmou1406/btspeaker@main/install.sh | sudo bash
+> ```
+>
+> 内网环境请用「方式二」，或设置 `BTSPEAKER_SRC_DIR=/path/to/source` 指向本地源码目录。
 
 ## 4. 方式二：克隆仓库安装
 

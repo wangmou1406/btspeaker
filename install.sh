@@ -27,7 +27,17 @@ APP_NAME="蓝音管家 BTSpeaker"
 GITHUB_OWNER="wangmou1406"
 GITHUB_REPO="btspeaker"
 GITHUB_BRANCH="main"
-TARBALL_URL="https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/refs/heads/${GITHUB_BRANCH}.tar.gz"
+TARBALL_PATH="${GITHUB_OWNER}/${GITHUB_REPO}/archive/refs/heads/${GITHUB_BRANCH}.tar.gz"
+TARBALL_URL="https://github.com/${TARBALL_PATH}"
+# 国内网络直连 github.com 经常超时：依次回退到公共加速镜像。
+# 可用 BTSPEAKER_TARBALL_URL 完全覆盖（支持 http(s)/file:// 或内网镜像），
+# 或用 BTSPEAKER_MIRROR=https://your-mirror/ 指定前缀（脚本会拼成 <前缀>/https://github.com/...）。
+TARBALL_MIRRORS=(
+	"https://ghfast.top/https://github.com/${TARBALL_PATH}"
+	"https://ghproxy.net/https://github.com/${TARBALL_PATH}"
+	"https://gh-proxy.com/https://github.com/${TARBALL_PATH}"
+	"https://hub.gitmirror.com/https://github.com/${TARBALL_PATH}"
+)
 
 INSTALL_DIR="/opt/btspeaker"
 LAUNCHER="/usr/local/bin/btspeaker"
@@ -115,6 +125,52 @@ while [ $# -gt 0 ]; do
 done
 
 # --------------------------------------------------------------------------- #
+# 逐个尝试 GitHub 直连与镜像下载源码包；成功返回 0
+download_archive() {
+	local archive="$1"
+	local -a urls=()
+	local url
+	if [ -n "${BTSPEAKER_TARBALL_URL:-}" ]; then
+		urls=("${BTSPEAKER_TARBALL_URL}")
+	else
+		urls=("${TARBALL_URL}")
+		if [ -n "${BTSPEAKER_MIRROR:-}" ]; then
+			urls=("${BTSPEAKER_MIRROR%/}/https://github.com/${TARBALL_PATH}" "${urls[@]}")
+		fi
+		urls+=("${TARBALL_MIRRORS[@]}")
+	fi
+	for url in "${urls[@]}"; do
+		info "尝试下载：${url}"
+		rm -f "$archive"
+		if command -v curl >/dev/null 2>&1; then
+			if curl -fL --retry 1 --connect-timeout 6 --max-time 180 -o "$archive" "$url" 2>/dev/null \
+				&& [ -s "$archive" ]; then
+				return 0
+			fi
+		elif wget -q -T 20 -O "$archive" "$url" 2>/dev/null && [ -s "$archive" ]; then
+			return 0
+		fi
+		warn "该地址不可用，尝试下一个..."
+	done
+	return 1
+}
+
+# tarball 全部失败时，若本机有 git，尝试通过镜像 clone
+try_git_clone() {
+	local target="$1"
+	local prefix
+	command -v git >/dev/null 2>&1 || return 1
+	for prefix in "" "https://ghfast.top/" "https://ghproxy.net/" "https://hub.gitmirror.com/"; do
+		info "尝试 git clone：${prefix}https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git"
+		rm -rf "$target"
+		if git clone --depth 1 --quiet "${prefix}https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git" "$target" 2>/dev/null; then
+			return 0
+		fi
+		warn "clone 失败，尝试下一个..."
+	done
+	return 1
+}
+
 # 定位源码目录：仓库目录内直接使用；curl | bash 场景自动下载源码包
 detect_source() {
 	local script_path="${BASH_SOURCE[0]:-$0}"
@@ -150,25 +206,34 @@ fetch_source() {
 	info "未检测到本地仓库文件（curl | bash 模式），将从 GitHub 下载源码包"
 	if [ "$DRY_RUN" = 1 ]; then
 		printf '  [dry-run] 下载 %s\n' "$TARBALL_URL"
+		printf '  [dry-run] 直连超时会依次尝试 %d 个加速镜像（ghfast/ghproxy/gh-proxy/gitmirror）\n' "${#TARBALL_MIRRORS[@]}"
 		printf '  [dry-run] 解压到临时目录并进入 btspeaker-main/\n'
 		SRC_DIR="<自动下载的源码目录>"
 		return 0
 	fi
 
-	command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 \
-		|| die "需要 curl 或 wget 才能下载源码包（请先安装：apt install curl）"
+	if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1 && ! command -v git >/dev/null 2>&1; then
+		die "需要 curl、wget 或 git 之一来下载源码包（如：apt install curl 或 apt install git）"
+	fi
 	CLEANUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/btspeaker-install.XXXXXX")" || die "创建临时目录失败"
 	local archive="$CLEANUP_DIR/btspeaker.tar.gz"
 
-	info "下载：$TARBALL_URL"
-	if command -v curl >/dev/null 2>&1; then
-		curl -fL --retry 3 --connect-timeout 15 -o "$archive" "$TARBALL_URL" \
-			|| die "下载失败，请检查网络或稍后重试；也可手动 git clone 后在仓库目录执行 sudo bash install.sh"
-	else
-		wget -O "$archive" "$TARBALL_URL" \
-			|| die "下载失败，请检查网络或稍后重试；也可手动 git clone 后在仓库目录执行 sudo bash install.sh"
+	info "下载源码包（GitHub 直连失败会自动尝试镜像）..."
+	if ! download_archive "$archive"; then
+		warn "所有源码包地址均失败，尝试通过镜像 git clone..."
+		if try_git_clone "$CLEANUP_DIR/src"; then
+			SRC_DIR="$CLEANUP_DIR/src"
+			[ -f "$SRC_DIR/btspeaker/__init__.py" ] || die "clone 的源码结构异常（缺少 btspeaker/__init__.py）"
+			info "源码已就绪：$SRC_DIR"
+			return 0
+		fi
+		die "下载失败：GitHub 直连与加速镜像均不可达（国内网络常见）。三种解决方式：
+  1) 换网络 / 挂代理后重试本命令；
+  2) 指定可用镜像重试：
+       sudo BTSPEAKER_TARBALL_URL='https://<你的镜像>/btspeaker-main.tar.gz' bash install.sh
+     或 sudo BTSPEAKER_MIRROR='https://ghfast.top/' bash install.sh
+  3) 在能访问 GitHub 的机器下载源码包，scp 到本机解压后进入目录执行：sudo bash install.sh"
 	fi
-
 	tar -xzf "$archive" -C "$CLEANUP_DIR" || die "解压源码包失败"
 	SRC_DIR=""
 	local dir
