@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "r_seed_morning",
+      "name": "早安播报",
+      "enabled": false,
+      "cooldown": 600,
+      "trigger": {"type": "schedule", "at": "07:30", "days": [0, 1, 2, 3, 4]},
+      "conditions": [],
+      "actions": [
+        {"type": "volume", "level": 60},
+        {"type": "tts", "text": "早上好，今天是{date}，{weekday}。今天也要元气满满。"}
+      ]
+    },
+    {
+      "id": "r_seed_welcome",
+      "name": "回家迎宾",
+      "enabled": false,
+      "cooldown": 300,
+      "trigger": {"type": "bluetooth", "event": "connected", "device": ""},
+      "conditions": [],
+      "actions": [
+        {"type": "play", "source": "welcome.wav", "label": "欢迎音"},
+        {"type": "tts", "text": "欢迎回家，{hostname} 已连接{bt_name}。"}
+      ]
+    },
+    {
+      "id": "r_seed_hourly",
+      "name": "整点报时",
+      "enabled": false,
+      "cooldown": 60,
+      "trigger": {"type": "schedule", "every_minutes": 60},
+      "conditions": [],
+      "actions": [
+        {"type": "play", "source": "chime.wav", "label": "整点提示音"},
+        {"type": "tts", "text": "现在是{time}。"}
+      ]
+    },
+    {
+      "id": "r_seed_silent",
+      "name": "深夜自动静音",
+      "enabled": false,
+      "cooldown": 0,
+      "trigger": {"type": "schedule", "at": "23:00"},
+      "conditions": [],
+      "actions": [
+        {"type": "volume", "level": 15},
+        {"type": "log", "message": "已进入深夜静音模式（音量 15%）"}
+      ]
+    },
+    {
+      "id": "r_seed_manual",
+      "name": "手动测试播报",
+      "enabled": false,
+      "cooldown": 5,
+      "trigger": {"type": "manual"},
+      "conditions": [],
+      "actions": [
+        {"type": "play", "source": "chime.wav", "label": "提示音"},
+        {"type": "tts", "text": "这是一条测试播报，当前时间{time}。"}
+      ]
+    }
+  ]
+}

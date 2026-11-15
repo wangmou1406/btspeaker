@@ -1,0 +1,54 @@
+#!/bin/sh /etc/rc.common
+# 蓝音管家 BTSpeaker —— OpenWrt / iStoreOS procd 启动脚本
+# 安装位置：/etc/init.d/btspeaker
+# 说明：服务以 root 运行（蓝牙控制、ALSA 放音都需要），监听端口来自
+#       /etc/btspeaker/config.json 的 server.port（默认 8722）。
+
+USE_PROCD=1
+
+# 在 network(20)/firewall(19)/bluetooth 之后启动，避免网卡与蓝牙未就绪
+START=95
+STOP=10
+
+PROG=/usr/bin/btspeaker
+DATA_DIR=/etc/btspeaker
+CONFIG="$DATA_DIR/config.json"
+RULES="$DATA_DIR/rules.json"
+
+# 数据目录兜底：保证被手工删除后服务仍能起来；btspeaker seed 是幂等的
+# （config.json / rules.json 已存在时不做改动），同时让 procd 监听的文件存在。
+seed_data() {
+	mkdir -p "$DATA_DIR" "$DATA_DIR/sounds" "$DATA_DIR/tmp" 2>/dev/null
+
+	if [ -x "$PROG" ]; then
+		"$PROG" seed --data-dir "$DATA_DIR" >/dev/null 2>&1 || true
+	fi
+}
+
+start_service() {
+	seed_data
+
+	procd_open_instance
+	procd_set_param command "$PROG" serve
+	# 崩溃自动拉起：3600 秒内最多 5 次，退避 0 秒
+	procd_set_param respawn 3600 5 0
+	# 标准输出/错误交给 procd（写入系统日志 logread）
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	# 配置文件变化时由 procd 自动重启服务
+	procd_set_param file "$CONFIG" "$RULES"
+	procd_close_instance
+}
+
+stop_service() {
+	# 实际进程由 procd 终止；这里只记录日志，便于排障
+	logger -t btspeaker "蓝音管家 BTSpeaker 服务已停止" 2>/dev/null || true
+}
+
+reload_service() {
+	# /etc/init.d/btspeaker reload：配置文件变化后快速重启
+	echo "配置已变更，正在重启蓝音管家 BTSpeaker ..."
+	stop
+	sleep 1
+	start
+}
