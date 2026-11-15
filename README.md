@@ -1,8 +1,10 @@
 # 蓝音管家 BTSpeaker
 
-**在 iStoreOS（OpenWrt 系）x86_64 软路由上，用浏览器连接、播放和控制你的蓝牙音箱，并把「什么时候放什么声音」变成自动化规则。**
+**在 Linux 主机上，用浏览器连接、播放和控制蓝牙音箱，并把「什么时候放什么声音」变成自动化规则。**
 
-蓝音管家是一个**独立 Web 服务应用**：纯 Python 标准库实现，不依赖任何第三方包，不占用 Docker、不引入 Node.js 构建链。装好后打开 `http://<路由器IP>:8722` 即可使用；服务由 procd 守护、开机自启，配置与数据都在 `/etc/btspeaker`。
+蓝音管家是一个**独立 Web 服务应用**：纯 Python 标准库实现，不依赖任何第三方 Python 包，不占用 Docker、不引入 Node.js 构建链。一条命令装好后打开 `http://<主机IP>:8722` 即可使用；服务由 systemd 守护、开机自启，配置与数据都在 `/etc/btspeaker`。
+
+支持 Debian / Ubuntu、Fedora、Arch Linux、openSUSE 等使用 systemd 的发行版（x86_64 / ARM 均可，纯 Python 无架构限制）。
 
 ---
 
@@ -11,16 +13,17 @@
 | 模块 | 能力 |
 | --- | --- |
 | 蓝牙管理 | 扫描附近设备、配对、连接/断开、信任、设为默认音箱、删除配对；后台轮询连接状态 |
-| 声音库 | 内置提示音（`chime.wav` / `welcome.wav` / `alarm.wav`）+ 用户声音目录（把音频文件放进 `/etc/btspeaker/sounds/`，刷新后自动出现在声音库下拉框） |
+| 声音库 | 内置提示音（`chime.wav` / `welcome.wav` / `alarm.wav`）+ 用户声音目录；支持在 Web 界面直接上传音频 |
 | 播放控制 | 播放本地文件 / 声音库文件名 / HTTP(S) URL；音量调节、停止、循环播放 |
-| TTS 播报 | 在线 TTS 接口（推荐，中文音质好）、`espeak` 离线兜底、模拟模式；支持文本模板变量 |
+| TTS 播报 | 在线 TTS 接口（推荐，中文音质好）、`espeak-ng` 离线兜底、模拟模式；支持文本模板变量 |
 | 定时任务 | 每天/指定星期几点几分、每 N 分钟执行；调度器每秒检查、不重复误触发 |
 | 事件触发 | 蓝牙连接/断开/配对、开机后延迟、手动（网页按钮 / HTTP hook / 命令行） |
 | 规则引擎 | 多动作顺序执行（播放、TTS、音量、连接、断开、命令、HTTP、等待、日志），条件判断、冷却时间 |
+| **保存** | **声音库上传**（Web 上传音频即时入库）+ **配置备份导出**（一键下载 config + 全部规则 JSON，便于迁移/恢复） |
 | Web 控制台 | 总览 / 音箱 / 自动化 / 设置 四个页面，归藏瑞士风（Swiss）视觉，全中文、纯离线（无 CDN） |
 | HTTP API | JSON REST 接口，统一信封；可选 `api_token` 鉴权；可被 Home Assistant、脚本、crontab 调用 |
 | 命令行 | `btspeaker status / devices / play / say / rules / logs / diag` 等，ssh 下脚本化 |
-| 诊断 | Web `/api/diag`、`bt-diag.sh` 中文链路诊断、日志环形缓冲 |
+| 诊断 | Web `/api/diag`、`bt-diag.sh` 中文链路诊断、`journalctl -u btspeaker` 日志 |
 
 ## 界面预览
 
@@ -44,7 +47,7 @@ flowchart LR
         HOOK["外部触发<br/>/api/hooks/{rule_id}"]
     end
 
-    subgraph svc["Python 服务层 /usr/lib/btspeaker"]
+    subgraph svc["Python 服务层 /opt/btspeaker"]
         API["api.py<br/>HTTP 服务 + 鉴权"]
         SERVICE["service.py<br/>装配 / 生命周期"]
         ENGINE["engine.py<br/>自动化引擎"]
@@ -58,14 +61,16 @@ flowchart LR
     end
 
     subgraph sys["系统层"]
-        BLUEZ["BlueZ<br/>bluetoothctl / bluetoothd"]
+        SYSTEMD["systemd<br/>btspeaker.service"]
+        BLUEZ["BlueZ<br/>bluetoothd / bluetoothctl"]
         BLUEALSA["BlueALSA<br/>bluealsa A2DP 桥接"]
         TOOLS["mpg123 / aplay / ffmpeg"]
-        TTSSRV["在线 TTS 接口 / espeak"]
+        TTSSRV["在线 TTS 接口 / espeak-ng"]
     end
 
     SPK[["蓝牙音箱<br/>A2DP"]]
 
+    SYSTEMD -->|"启动 / 守护 / 重启"| SERVICE
     WEB -->|"HTTP JSON /api/*"| API
     CLI -->|"本机 HTTP"| API
     HOOK --> API
@@ -84,46 +89,100 @@ flowchart LR
 
 ## 安装
 
-目标环境：iStoreOS / OpenWrt x86_64（Python 3.9+，opkg、procd、BlueZ）。两种方式任选其一。
-
-### 方式一：iStore 上传 ipk 安装（推荐）
+### 方式一：一键安装（推荐）
 
 ```bash
-# 在开发机 / 任意装有 Python 3 的机器上，于项目根目录构建
-python scripts/build_ipk.py
-# 产物：dist/btspeaker_1.0.0_all.ipk
+curl -fsSL https://raw.githubusercontent.com/wangmou1406/btspeaker/main/install.sh | sudo bash
 ```
 
-把 `dist/btspeaker_1.0.0_all.ipk` 通过 iStoreOS 的 **iStore / 系统 → 软件包 → 手动安装** 上传安装；或 scp 到路由器后执行：
+脚本会自动完成：
+
+1. 识别发行版与包管理器（apt / dnf / pacman / zypper），安装依赖：
+   `python3`、`bluez`、`bluez-alsa`（自动尝试多个包名）、`alsa-utils`、`mpg123`；
+2. 部署程序到 `/opt/btspeaker`，启动器 `/usr/local/bin/btspeaker`；
+3. 初始化数据目录 `/etc/btspeaker`（`config.json` + 5 条默认停用的示例规则）；
+4. 安装 systemd 单元 `/etc/systemd/system/btspeaker.service`，`daemon-reload` + `enable --now`；
+5. 打印访问地址与后续 3 条命令。
+
+可选参数（把参数传给远程脚本）：
 
 ```bash
-scp dist/btspeaker_1.0.0_all.ipk root@192.168.1.1:/tmp/
-ssh root@192.168.1.1
-opkg install /tmp/btspeaker_1.0.0_all.ipk
+# 离线/依赖已自备：跳过系统包安装
+curl -fsSL .../install.sh | sudo bash -s -- --no-deps
+
+# 额外安装 espeak-ng（离线 TTS）与 ffmpeg（多格式解码）
+curl -fsSL .../install.sh | sudo bash -s -- --optional
+
+# 只预览计划、不改动系统（无需 root）
+curl -fsSL .../install.sh | bash -s -- --dry-run
 ```
 
-安装包会自动完成：创建程序目录与数据目录、`btspeaker seed` 初始化配置与 5 条示例规则、opkg 依赖安装、防火墙放行 TCP 8722、`/etc/init.d/btspeaker enable && start`。
-
-### 方式二：ssh 运行 install.sh（源码方式）
+### 方式二：克隆仓库手动安装
 
 ```bash
-# 把整个项目目录传到路由器（scp / git clone 均可），然后：
-ssh root@192.168.1.1
-cd /tmp/istoreos-btspeaker
-sh install.sh                # 正常安装（可重复执行 = 升级覆盖）
-sh install.sh --dry-run      # 只预览，不改动系统
-sh install.sh --no-deps      # 依赖已自备时跳过 opkg 安装
+git clone https://github.com/wangmou1406/btspeaker.git
+cd btspeaker
+sudo bash install.sh              # 安装 / 重复执行即升级覆盖
+sudo bash install.sh --dry-run    # 先预览
+sudo bash install.sh --no-deps    # 依赖已自行安装
+sudo bash install.sh --optional   # 额外安装 espeak-ng / ffmpeg
 ```
 
-`install.sh` 做的事情与 ipk 的 postinst 相同：检查 root 与 OpenWrt 环境 → `opkg install` 依赖 → 创建 `/usr/lib/btspeaker`、`/usr/share/btspeaker/sounds`、`/etc/btspeaker/{sounds,tmp}` → 拷贝 Python 包 / 启动器 `/usr/bin/btspeaker` / procd 启动脚本 → 安装内置声音库与诊断脚本 → `btspeaker seed` 初始化数据目录（已存在则不覆盖）→ uci 防火墙放行 TCP 8722 → 开机自启并启动 → 打印访问地址。
+> 内网/离线环境也可直接下载源码包解压后执行 `install.sh`；
+> 或设置 `BTSPEAKER_SRC_DIR=/path/to/btspeaker` 让脚本使用指定源码目录。
 
-> 构建脚本还会生成 `dist/btspeaker-1.0.0-all.tar.gz` 离线安装包，解压后进入目录执行 `sh install.sh` 即可，适合内网离线部署。
+### 依赖速查（脚本会自动安装；手动安装时参考）
 
-详细依赖说明、手动安装步骤、iStore 上传流程、升级/回滚见 [docs/INSTALL.md](docs/INSTALL.md)。
+| 发行版 | 一键命令 |
+| --- | --- |
+| Debian / Ubuntu | `sudo apt install python3 bluez bluez-alsa-utils alsa-utils mpg123` |
+| Fedora | `sudo dnf install python3 bluez bluez-alsa alsa-utils mpg123` |
+| Arch Linux | `sudo pacman -S python bluez bluez-alsa alsa-utils mpg123` |
+| openSUSE | `sudo zypper install python3 bluez bluez-alsa alsa-utils mpg123` |
+| 可选（离线 TTS / 多格式） | Debian: `espeak-ng ffmpeg`；Fedora/Arch/openSUSE 同名包 |
+
+> `bluez-alsa` 是**蓝牙 A2DP 放音的关键**：它把音箱的蓝牙音频桥接成 ALSA PCM 设备。
+> 各发行版包名不同（`bluez-alsa-utils` / `bluez-alsa` / `bluealsa`），安装脚本会自动尝试。
+> 装不上时服务仍可启动，但播放会提示「未检测到 BlueALSA PCM」。
+
+### 手动分步安装（不想用脚本时）
+
+```bash
+# 1) 依赖（按上表选择）
+sudo apt install python3 bluez bluez-alsa-utils alsa-utils mpg123
+
+# 2) 程序文件
+sudo mkdir -p /opt/btspeaker /usr/share/btspeaker/sounds /etc/btspeaker/{sounds,tmp}
+sudo cp -R btspeaker /opt/btspeaker/
+sudo cp -R scripts /opt/btspeaker/scripts
+sudo cp packaging/bin/btspeaker /usr/local/bin/btspeaker && sudo chmod 0755 /usr/local/bin/btspeaker
+sudo cp packaging/systemd/btspeaker.service /etc/systemd/system/btspeaker.service
+sudo cp assets/sounds/*.wav /usr/share/btspeaker/sounds/
+
+# 3) 初始化配置与示例规则（幂等）
+sudo PYTHONPATH=/opt/btspeaker python3 -m btspeaker seed --data-dir /etc/btspeaker
+
+# 4) 注册并启动 systemd 服务
+sudo systemctl daemon-reload
+sudo systemctl enable --now btspeaker
+```
+
+## systemd 服务管理
+
+```bash
+sudo systemctl daemon-reload            # 修改 unit 后重载
+sudo systemctl enable --now btspeaker   # 开机自启 + 立即启动
+sudo systemctl status btspeaker         # 查看状态
+sudo systemctl restart btspeaker        # 重启（改配置后）
+sudo systemctl stop btspeaker           # 停止
+sudo systemctl disable btspeaker        # 取消开机自启
+journalctl -u btspeaker -f              # 实时日志
+journalctl -u btspeaker -n 100 --no-pager   # 最近 100 行日志
+```
 
 ## 使用入门
 
-1. **打开控制台**：浏览器访问 `http://<路由器LAN IP>:8722/`（安装脚本结束时也会打印地址）。
+1. **打开控制台**：浏览器访问 `http://<主机IP>:8722/`（安装脚本结束时也会打印地址）。
 2. **配对音箱**：进入「音箱」页 → 点击「扫描」→ 在列表里点「配对」并「连接」；也可以点「设为默认」，之后自动化规则会优先使用它。
    ```bash
    btspeaker devices --scan
@@ -137,20 +196,22 @@ sh install.sh --no-deps      # 依赖已自备时跳过 opkg 安装
    btspeaker volume 60
    btspeaker say 你好，我是蓝音管家
    ```
-4. **配置 TTS**：进入「设置」页填写 TTS 服务地址（支持 `{text}` / `{lang}` 模板变量），或安装 `espeak` 作为离线兜底。TTS 未配置时，只有 `tts` 动作会报错，播放/规则其它功能不受影响。
-5. **启用自动化**：5 条示例规则默认**全部停用**，确认音箱正常后到「自动化」页逐条启用，或直接新建规则。
+4. **保存自己的声音**：在「音箱」页（声音库区域）点「上传声音」，选择 mp3/wav 文件即可写入 `/etc/btspeaker/sounds/` 并立即出现在声音库下拉框中；也可直接把音频文件放进该目录后刷新。
+5. **配置 TTS**：进入「设置」页填写 TTS 服务地址（支持 `{text}` / `{lang}` 模板变量），或安装 `espeak-ng` 作为离线兜底。TTS 未配置时，只有 `tts` 动作会报错，播放/规则其它功能不受影响。
+6. **备份/迁移**：「设置」页点「导出配置备份」，会下载一个包含 `config.json` 与全部规则的 JSON 文件（也可 `curl -s http://127.0.0.1:8722/api/backup`）；规则可在「自动化」页单独导出/导入。
+7. **启用自动化**：5 条示例规则默认**全部停用**，确认音箱正常后到「自动化」页逐条启用，或直接新建规则。
 
 ### 内置示例规则（首次启动自动写入，默认停用）
 
 | 规则 | 触发器 | 动作 |
 | --- | --- | --- |
-| 早安播报 | 每周一至周五 07:30 | 音量 60 → TTS「早上好，今天是{date}，{weekday}…」 |
+| 早安播报 | 每周一至周五 07:30（冷却 600 秒） | 音量 60 → TTS「早上好，今天是{date}，{weekday}…」 |
 | 回家迎宾 | 蓝牙连接任意音箱（冷却 300 秒） | 播放 `welcome.wav` → TTS 欢迎语 |
-| 整点报时 | 每 60 分钟 | 播放 `chime.wav` → TTS「现在是{time}。」 |
+| 整点报时 | 每 60 分钟（冷却 60 秒） | 播放 `chime.wav` → TTS「现在是{time}。」 |
 | 深夜自动静音 | 每天 23:00 | 音量调到 15 → 记录日志 |
-| 手动测试播报 | 手动触发 | 播放 `chime.wav` → TTS 测试播报 |
+| 手动测试播报 | 手动触发（冷却 5 秒） | 播放 `chime.wav` → TTS 测试播报 |
 
-> 示例规则来自随包文件 `btspeaker/seed_rules.json`，由 `btspeaker seed` 写入 `/etc/btspeaker/rules.json`；已有规则文件时不会覆盖。恢复默认：删除或备份 `rules.json` 后再次执行 `btspeaker seed --data-dir /etc/btspeaker`。
+> 示例规则来自随包文件 `btspeaker/seed_rules.json`，由 `btspeaker seed` 写入 `/etc/btspeaker/rules.json`；已有规则文件时不会覆盖。恢复默认：备份/删除 `rules.json` 后执行 `sudo PYTHONPATH=/opt/btspeaker python3 -m btspeaker seed --data-dir /etc/btspeaker`。
 
 ### 规则长什么样
 
@@ -179,8 +240,8 @@ btspeaker diag              # 蓝牙 / 音频 / TTS 链路自检
 btspeaker logs -n 50        # 最近日志
 btspeaker rules list        # 规则列表
 btspeaker rules run <id>    # 立即执行一条规则
-/etc/init.d/btspeaker restart|reload|status
-sh /usr/share/btspeaker/scripts/bt-diag.sh   # 蓝牙链路诊断
+btspeaker info              # 系统信息
+sudo sh /opt/btspeaker/scripts/bt-diag.sh   # 蓝牙链路诊断（中文修复建议）
 ```
 
 ## HTTP API 摘要
@@ -195,7 +256,7 @@ sh /usr/share/btspeaker/scripts/bt-diag.sh   # 蓝牙链路诊断
 | GET / PUT | `/api/settings` | 读取（脱敏）/ 修改配置 |
 | GET | `/api/bluetooth/devices` | 设备列表、当前连接、适配器信息 |
 | POST / GET | `/api/bluetooth/scan` | 启动扫描 / 查询扫描结果 |
-| POST | `/api/bluetooth/connect` · `disconnect` · `pair` | 连接 / 断开 / 配对 |
+| POST | `/api/bluetooth/connect` · `/disconnect` · `/pair` | 连接 / 断开 / 配对 |
 | POST | `/api/bluetooth/default` | 设置默认音箱 |
 | DELETE | `/api/bluetooth/devices/{address}` | 删除配对记录 |
 | GET | `/api/player` | 播放状态、音量、播放器自检 |
@@ -205,7 +266,9 @@ sh /usr/share/btspeaker/scripts/bt-diag.sh   # 蓝牙链路诊断
 | GET / PUT / DELETE | `/api/rules/{id}` | 查询 / 修改 / 删除规则 |
 | POST | `/api/rules/{id}/run` · `/toggle` | 立即执行 / 启用停用 |
 | GET / POST | `/api/rules/export` · `/import` | 规则导出 / 导入 |
-| GET | `/api/library` | 声音库列表 |
+| GET | `/api/library` | 声音库文件列表 |
+| POST | `/api/library/upload?name=<文件名>` | 上传声音到库（请求体为音频原始字节，≤20MB） |
+| GET | `/api/backup` | 导出配置备份（config + 全部规则，JSON 下载） |
 | GET / DELETE | `/api/logs` | 日志查询 / 清空 |
 | GET | `/api/events` | 最近规则执行记录 |
 | GET | `/api/diag` | 系统自检结果与修复建议 |
@@ -215,9 +278,11 @@ sh /usr/share/btspeaker/scripts/bt-diag.sh   # 蓝牙链路诊断
 
 ## 目录结构
 
+仓库：
+
 ```
-istoreos-btspeaker/
-├── btspeaker/                 # Python 服务（安装到 /usr/lib/btspeaker/btspeaker）
+btspeaker/
+├── btspeaker/                 # Python 服务（安装到 /opt/btspeaker/btspeaker）
 │   ├── __init__.py            # 版本与产品常量
 │   ├── __main__.py / cli.py   # 命令行入口（serve / seed / status / devices / play / say ...）
 │   ├── api.py                 # HTTP 服务、路由、鉴权、静态资源托管
@@ -234,30 +299,31 @@ istoreos-btspeaker/
 │   ├── util.py                # 日志、命令、模板、时间等公共工具
 │   ├── seed_rules.json        # 5 条示例规则（默认停用）
 │   └── web/                   # 纯静态 Web 控制台（无构建、无 CDN）
+├── packaging/
+│   ├── systemd/btspeaker.service   # systemd 单元（安装到 /etc/systemd/system/）
+│   ├── bin/btspeaker               # 启动器（安装到 /usr/local/bin/）
+│   └── openwrt/                    # 历史归档：OpenWrt/iStoreOS 路线（不推荐，见下文）
 ├── scripts/
-│   ├── init.d-btspeaker       # procd 启动脚本（安装为 /etc/init.d/btspeaker）
-│   ├── btspeaker-launcher.sh  # 启动器（安装为 /usr/bin/btspeaker）
-│   ├── bt-diag.sh             # 蓝牙链路中文诊断脚本
-│   └── build_ipk.py           # 纯标准库 .ipk 打包工具
+│   ├── bt-diag.sh             # 蓝牙链路中文诊断（systemd 版）
+│   └── install-deps.sh        # 依赖安装/补装（按发行版，幂等）
 ├── assets/sounds/             # 内置声音库（chime / welcome / alarm）
-├── install.sh                 # 一键安装 / 升级
+├── install.sh                 # 一键安装（支持 curl | sudo bash）
 ├── uninstall.sh               # 卸载（默认保留配置，--purge 彻底删除）
-├── docs/                      # INSTALL / FAQ / API / RULES / CONTRACTS
+├── docs/                      # INSTALL / FAQ / API / RULES / 截图
 ├── tests/                     # 标准库 unittest 测试
-├── dist/                      # 构建产物（ipk / tar.gz，不入库）
 └── VERSION
 ```
 
-路由器上的安装布局：
+安装后（Linux）：
 
 ```
-/usr/bin/btspeaker                     启动器（PYTHONPATH=/usr/lib/btspeaker）
-/usr/lib/btspeaker/btspeaker/          Python 包（含 web/）
-/etc/init.d/btspeaker                  procd 启动脚本（开机自启）
-/usr/share/btspeaker/sounds/           内置声音库
-/usr/share/btspeaker/scripts/bt-diag.sh
-/etc/btspeaker/                        数据目录：config.json、rules.json、state.json、
-                                       btspeaker.log、sounds/、tmp/
+/opt/btspeaker/btspeaker/               Python 包（含 web/ 与 seed_rules.json）
+/opt/btspeaker/scripts/                 bt-diag.sh、install-deps.sh
+/usr/local/bin/btspeaker                启动器（PYTHONPATH=/opt/btspeaker）
+/etc/systemd/system/btspeaker.service   systemd 单元（开机自启）
+/usr/share/btspeaker/sounds/            内置声音库
+/etc/btspeaker/                         数据目录：config.json、rules.json、state.json、
+                                        btspeaker.log、sounds/（用户上传）、tmp/
 ```
 
 ## 排障
@@ -265,19 +331,21 @@ istoreos-btspeaker/
 先跑一遍诊断，大部分问题能直接定位：
 
 ```bash
-sh /usr/share/btspeaker/scripts/bt-diag.sh   # 蓝牙/音频/服务/端口/日志逐项检查
-btspeaker diag                               # 服务内置自检（蓝牙/播放器/TTS）
-tail -n 100 /etc/btspeaker/btspeaker.log     # 服务日志
-logread | grep -i btspeaker                  # procd 系统日志
+sudo sh /opt/btspeaker/scripts/bt-diag.sh     # 服务/端口/蓝牙/BlueALSA/播放器/日志逐项检查
+btspeaker diag                                # 服务内置自检（蓝牙/播放器/TTS）
+journalctl -u btspeaker -n 100 --no-pager     # systemd 日志
+tail -n 100 /etc/btspeaker/btspeaker.log      # 服务日志
 ```
 
 | 现象 | 先检查 |
 | --- | --- |
-| 打不开网页 | `pgrep -f 'btspeaker serve'`、`netstat -lnt | grep 8722`、`/etc/init.d/btspeaker status` |
-| 没声音 | `bluetoothctl info <MAC>` 是否 Connected、`aplay -L` 是否有 bluealsa、mpg123 是否安装 |
-| 配不上对 | 音箱是否处于配对模式、`bluetoothctl show` 是否 Powered: yes、`hciconfig` 是否有 hci0 |
-| TTS 不响 | 设置页 TTS 地址/方法/模板是否正确，或安装 `espeak` 并切换后端 |
-| 规则不触发 | 规则是否启用、`rules.enabled` 是否为 true、冷却时间、`btspeaker logs` 是否有 error |
+| 打不开网页 | `systemctl status btspeaker`、`ss -lntp | grep 8722`、`journalctl -u btspeaker -n 50` |
+| 没声音 | `bluetoothctl info <MAC>` 是否 Connected、`aplay -L` 是否有 bluealsa、bluealsa 进程是否在运行 |
+| bluealsa 未安装/未启动 | 按发行版装 `bluez-alsa-utils` / `bluez-alsa`，然后 `systemctl enable --now bluealsa` |
+| 配不上对 | 音箱是否处于配对模式、`bluetoothctl show` 是否 Powered: yes、`rfkill list bluetooth` 是否被禁用 |
+| TTS 不响 | 设置页 TTS 地址/方法/模板是否正确，或安装 `espeak-ng` 并切换后端 |
+| 规则不触发 | 规则是否启用（示例默认全部停用）、`rules.enabled`、冷却时间、`btspeaker logs` 是否有 error |
+| 依赖装不上 | 运行 `sudo sh /opt/btspeaker/scripts/install-deps.sh` 重试，或按上表手动安装 |
 
 更细的排查步骤见 [docs/FAQ.md](docs/FAQ.md)。开发机无蓝牙硬件时可用模拟模式：
 
@@ -288,24 +356,25 @@ BTSPEAKER_SIM=1 python -m btspeaker serve --data-dir .btsdata --port 8722
 ## 卸载
 
 ```bash
-# 方式一（源码目录）
-sh uninstall.sh            # 停止并删除程序文件，保留 /etc/btspeaker 配置与数据
-sh uninstall.sh --purge    # 同时删除 /etc/btspeaker（配置、规则、日志、用户声音）
-
-# 方式二（opkg）
-opkg remove btspeaker
-rm -rf /etc/btspeaker      # 需要彻底清理时手动删除
+# 仓库目录内
+sudo bash uninstall.sh            # 停止并删除程序，保留 /etc/btspeaker 配置与数据
+sudo bash uninstall.sh --purge    # 同时删除 /etc/btspeaker（配置、规则、日志、用户声音）
+sudo bash uninstall.sh --dry-run  # 先预览
 ```
 
-卸载会移除 `/usr/lib/btspeaker`、`/usr/bin/btspeaker`、`/etc/init.d/btspeaker`、`/usr/share/btspeaker` 以及防火墙放行规则；默认保留下 `/etc/btspeaker`，重新安装后配置依旧可用。
+卸载会停止并禁用 systemd 服务 `btspeaker`，删除 `/etc/systemd/system/btspeaker.service`、`/opt/btspeaker`、`/usr/local/bin/btspeaker`、`/usr/share/btspeaker`；默认保留 `/etc/btspeaker`，重新安装后配置依旧可用。
+
+## 历史归档：OpenWrt / iStoreOS
+
+项目早期面向 iStoreOS（OpenWrt 系）x86_64 软路由，使用 opkg / procd / ipk 打包。该路线**自 1.0.0 起不再维护**，相关代码归档在 [`packaging/openwrt/`](packaging/openwrt/)，仅供历史参考，**不推荐使用**。普通 Linux 用户请忽略该目录，使用根目录的 `install.sh` 与 systemd 单元。
 
 ## 安全说明
 
-- **面向局域网设计**：默认监听 `0.0.0.0:8722`，HTTP 明文传输，**不要直接暴露到公网**。安装脚本只放行 lan 区域；如需从 WAN 访问，请自行加反向代理与 TLS，并设置强 `api_token`。
+- **面向局域网设计**：默认监听 `0.0.0.0:8722`，HTTP 明文传输，**不要直接暴露到公网**。如需远程访问，请使用 VPN，或反向代理 + TLS，并设置强 `api_token`。
 - **API Token**：在「设置 → 安全」或 `config.json` 的 `security.api_token` 中设置后，除健康检查外的 API 都需要 `X-Api-Token`。命令行用 `--token` 或环境变量 `BTSPEAKER_TOKEN`。
-- **命令执行默认关闭**：规则里的 `command` 动作只有在 `security.allow_commands=true` 时才允许，且 `security.command_allowlist` 非空时只允许前缀匹配的命令。开启前请确认路由器仅自己可管理。
-- **服务以 root 运行**：蓝牙控制（`bluetoothctl`）与 ALSA 放音需要 root 权限；请为路由器设置强密码、关闭 WAN 侧 ssh，并限制 8722 只对可信网段开放。
-- **TTS 地址与 headers 会保存在配置中**：如果 TTS 服务 URL 带密钥，请使用内网服务或注意 `config.json` 的备份/分享范围。
+- **命令执行默认关闭**：规则里的 `command` 动作只有在 `security.allow_commands=true` 时才允许，且 `security.command_allowlist` 非空时只允许前缀匹配的命令。开启前请确认主机仅自己可管理。
+- **服务以 root 运行**：蓝牙控制（`bluetoothctl`）与 ALSA 放音通常需要 root 权限；请为系统账号设置强密码、限制 ssh 来源，并用防火墙限制 8722 只对可信网段开放。
+- **上传文件限制**：声音库上传有格式白名单与大小上限（默认 20MB，可配 `sounds.max_upload_mb`），文件写入 `/etc/btspeaker/sounds/`，不会被执行。
 - 所有 API 返回配置时会对 `api_token` 脱敏（`******`）；日志与状态接口不返回密钥。
 
 ## 开发
@@ -313,12 +382,11 @@ rm -rf /etc/btspeaker      # 需要彻底清理时手动删除
 ```bash
 python -m unittest discover -s tests -v    # 全部测试（无需硬件/外网）
 BTSPEAKER_SIM=1 python -m btspeaker serve --data-dir .btsdata --port 8722
-python scripts/build_ipk.py                # 构建 ipk + 离线 tar.gz
 ```
 
-- 运行环境（路由器）：Python 3.11 `python3-light`；代码保持 Python 3.9 语法兼容、只用标准库。
-- 开发机：Windows / Linux / macOS + Python 3.9+，模拟模式可完整跑通 Web、规则、TTS（mock）。
-- 契约与模块边界见 [docs/CONTRACTS.md](docs/CONTRACTS.md)；测试从仓库根目录运行。
+- 目标环境：Linux + Python 3.9+；代码保持 Python 3.9 语法兼容、只用标准库。
+- 开发机：Windows / macOS / Linux + Python 3.9+，模拟模式可完整跑通 Web、规则、TTS（mock）。
+- 模块契约与接口约定见 [docs/CONTRACTS.md](docs/CONTRACTS.md)；测试从仓库根目录运行。
 
 ## 许可证
 

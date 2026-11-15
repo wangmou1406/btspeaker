@@ -1,0 +1,40 @@
+#!/bin/sh
+# 蓝音管家 BTSpeaker —— 启动器（安装为 /usr/local/bin/btspeaker）
+#
+# 用法示例：
+#   btspeaker serve                      # 前台启动服务（systemd 单元使用）
+#   btspeaker serve --data-dir /etc/btspeaker --port 8722
+#   btspeaker status                     # 通过本机 HTTP API 查看状态
+#   btspeaker --help                     # 命令行帮助
+#
+# 程序包安装位置：/opt/btspeaker/btspeaker（PYTHONPATH 指向 /opt/btspeaker）
+
+set -u
+
+PYTHON="${BTSPEAKER_PYTHON:-/usr/bin/python3}"
+LIB_DIR="${BTSPEAKER_LIB:-/opt/btspeaker}"
+
+if [ ! -x "$PYTHON" ]; then
+	PYTHON="$(command -v python3 2>/dev/null || true)"
+fi
+if [ -z "$PYTHON" ] || [ ! -x "$PYTHON" ]; then
+	echo "错误：未找到 python3，请先安装（Debian/Ubuntu: apt install python3；Fedora: dnf install python3）" >&2
+	exit 127
+fi
+
+if [ ! -d "$LIB_DIR/btspeaker" ]; then
+	echo "错误：未找到程序目录 $LIB_DIR/btspeaker，请重新执行 install.sh 安装蓝音管家" >&2
+	exit 1
+fi
+
+# 保证能 import btspeaker 包，同时保留用户已有的 PYTHONPATH
+if [ -n "${PYTHONPATH:-}" ]; then
+	PYTHONPATH="$LIB_DIR:$PYTHONPATH"
+else
+	PYTHONPATH="$LIB_DIR"
+fi
+export PYTHONPATH
+export PYTHONIOENCODING="${PYTHONIOENCODING:-utf-8}"
+export PYTHONUNBUFFERED=1
+
+exec "$PYTHON" -m btspeaker "$@"

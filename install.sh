@@ -1,41 +1,47 @@
-#!/bin/sh
-# 蓝音管家 BTSpeaker —— iStoreOS / OpenWrt x86_64 一键安装脚本
+#!/usr/bin/env bash
+# 蓝音管家 BTSpeaker —— Linux 一键安装脚本（systemd）
 #
-# 用法（在项目根目录、以 root 执行）：
-#   sh install.sh                 正常安装 / 重复执行即升级覆盖
-#   sh install.sh --dry-run       仅预览将执行的操作，不改动系统
-#   sh install.sh --no-deps       跳过 opkg 依赖安装（依赖已自备时使用）
-#   sh install.sh --help          显示帮助
+# 单行安装（推荐）：
+#   curl -fsSL https://raw.githubusercontent.com/wangmou1406/btspeaker/main/install.sh | sudo bash
+#
+# 源码方式（在仓库目录内）：
+#   sudo bash install.sh                 # 安装 / 重复执行即升级覆盖
+#   sudo bash install.sh --no-deps       # 依赖已自备时跳过系统包安装
+#   sudo bash install.sh --optional      # 额外安装 espeak-ng 与 ffmpeg
+#   bash install.sh --dry-run            # 只打印计划，不改动系统（非 root 也可）
 #
 # 安装内容：
-#   /usr/lib/btspeaker/btspeaker    Python 包（含 web/ 静态界面）
-#   /usr/bin/btspeaker              启动器（PYTHONPATH=/usr/lib/btspeaker）
-#   /etc/init.d/btspeaker           procd 启动脚本（开机自启）
-#   /usr/share/btspeaker/sounds     内置声音库
-#   /usr/share/btspeaker/scripts/bt-diag.sh 蓝牙链路诊断脚本
-#   /etc/btspeaker/                 数据目录（由 btspeaker seed 初始化）
-#   防火墙放行 TCP 8722（lan 区域）
+#   /opt/btspeaker/btspeaker      Python 包（含 web/ 控制台与 seed_rules.json）
+#   /opt/btspeaker/scripts        bt-diag.sh、install-deps.sh
+#   /usr/local/bin/btspeaker      启动器（PYTHONPATH=/opt/btspeaker）
+#   /etc/systemd/system/btspeaker.service   systemd 单元（开机自启）
+#   /usr/share/btspeaker/sounds   内置声音库
+#   /etc/btspeaker                数据目录（config.json、rules.json、日志、用户声音）
+#
+# 依赖：python3、bluez、bluez-alsa（多包名自动尝试）、alsa-utils、mpg123；
+#       可选：espeak-ng（离线 TTS）、ffmpeg（多格式解码）。
 
 set -u
 
 APP_NAME="蓝音管家 BTSpeaker"
-PKG_NAME="btspeaker"
-VERSION="unknown"
+GITHUB_OWNER="wangmou1406"
+GITHUB_REPO="btspeaker"
+GITHUB_BRANCH="main"
+TARBALL_URL="https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/refs/heads/${GITHUB_BRANCH}.tar.gz"
 
-PREFIX_LIB="/usr/lib/btspeaker"
-PREFIX_BIN="/usr/bin/btspeaker"
-SHARE_DIR="/usr/share/btspeaker"
-SOUND_DIR="$SHARE_DIR/sounds"
-SCRIPTS_DIR="$SHARE_DIR/scripts"
+INSTALL_DIR="/opt/btspeaker"
+LAUNCHER="/usr/local/bin/btspeaker"
+UNIT_FILE="/etc/systemd/system/btspeaker.service"
 DATA_DIR="/etc/btspeaker"
-INIT_SCRIPT="/etc/init.d/btspeaker"
+SOUND_DIR="/usr/share/btspeaker/sounds"
 PORT="8722"
-
-# 运行依赖（python3 标准库子包 + BlueZ/BlueALSA + ALSA 播放工具 + 蓝牙内核模块）
-REQUIRED_PKGS="python3-light python3-urllib python3-openssl python3-email python3-logging python3-uuid bluez-daemon bluez-utils bluealsa alsa-utils mpg123 kmod-bluetooth kmod-btusb"
 
 DRY_RUN=0
 NO_DEPS=0
+OPTIONAL=0
+SRC_DIR=""
+SRC_MODE=""
+CLEANUP_DIR=""
 
 # --------------------------------------------------------------------------- #
 info() { printf '[信息] %s\n' "$*"; }
@@ -46,20 +52,23 @@ die()  { err "$*"; exit 1; }
 
 usage() {
 	cat <<'EOF'
-蓝音管家 BTSpeaker 一键安装脚本
+蓝音管家 BTSpeaker —— Linux 一键安装脚本
 
 用法：
-  sh install.sh [选项]
+  sudo bash install.sh [选项]
 
 选项：
-  --dry-run, -n   只预览将要执行的操作，不修改系统（可在非 root 下运行）
-  --no-deps       跳过 opkg 依赖安装（适用于依赖已自行安装 / 离线环境）
+  --dry-run, -n   只打印将要执行的操作，不修改系统（非 root 也可运行）
+  --no-deps       跳过系统依赖安装（python3/bluez/bluez-alsa 等已自备）
+  --optional      额外安装 espeak-ng（离线 TTS）与 ffmpeg（多格式解码）
   --help, -h      显示本帮助
 
-示例：
-  sudo sh install.sh
-  sudo sh install.sh --no-deps
-  sh install.sh --dry-run
+单行安装：
+  curl -fsSL https://raw.githubusercontent.com/wangmou1406/btspeaker/main/install.sh | sudo bash
+
+说明：
+  脚本会自动识别发行版（apt / dnf / pacman / zypper）安装依赖，
+  部署到 /opt/btspeaker，注册 systemd 服务 btspeaker 并设置开机自启。
 EOF
 }
 
@@ -72,30 +81,12 @@ run() {
 	"$@"
 }
 
-# 判断服务进程是否在运行
-service_running() {
-	if command -v pgrep >/dev/null 2>&1; then
-		pgrep -f 'btspeaker serve' >/dev/null 2>&1
-	else
-		ps 2>/dev/null | grep -v grep | grep -q 'btspeaker serve'
+cleanup() {
+	if [ -n "${CLEANUP_DIR:-}" ] && [ -d "$CLEANUP_DIR" ]; then
+		rm -rf "$CLEANUP_DIR"
 	fi
 }
-
-# 获取局域网访问地址
-lan_ip() {
-	_lan_ip=""
-	if command -v uci >/dev/null 2>&1; then
-		_lan_ip="$(uci -q get network.lan.ipaddr 2>/dev/null || true)"
-	fi
-	if [ -z "$_lan_ip" ] && command -v ip >/dev/null 2>&1; then
-		_lan_ip="$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -n 1)"
-	fi
-	if [ -z "$_lan_ip" ]; then
-		_lan_ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
-	fi
-	[ -n "$_lan_ip" ] || _lan_ip="<路由器LAN IP>"
-	printf '%s' "$_lan_ip"
-}
+trap cleanup EXIT INT TERM
 
 # --------------------------------------------------------------------------- #
 # 参数解析
@@ -106,6 +97,9 @@ while [ $# -gt 0 ]; do
 			;;
 		--no-deps)
 			NO_DEPS=1
+			;;
+		--optional)
+			OPTIONAL=1
 			;;
 		--help|-h)
 			usage
@@ -120,279 +114,329 @@ while [ $# -gt 0 ]; do
 	shift
 done
 
-# 定位源码目录（install.sh 所在目录）
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+# --------------------------------------------------------------------------- #
+# 定位源码目录：仓库目录内直接使用；curl | bash 场景自动下载源码包
+detect_source() {
+	local script_path="${BASH_SOURCE[0]:-$0}"
+	local dir=""
 
-if [ -f "$SCRIPT_DIR/VERSION" ]; then
-	VERSION="$(tr -d ' \t\r\n' < "$SCRIPT_DIR/VERSION")"
-fi
+	if [ -n "$script_path" ] && [ -f "$script_path" ] && [ "$(basename -- "$script_path")" != "bash" ]; then
+		dir="$(cd -- "$(dirname -- "$script_path")" >/dev/null 2>&1 && pwd || true)"
+	fi
+	if [ -n "$dir" ] && [ -f "$dir/btspeaker/__init__.py" ] && [ -f "$dir/packaging/systemd/btspeaker.service" ]; then
+		SRC_DIR="$dir"
+		SRC_MODE="local"
+		return 0
+	fi
+	if [ -n "${BTSPEAKER_SRC_DIR:-}" ] && [ -f "${BTSPEAKER_SRC_DIR}/btspeaker/__init__.py" ]; then
+		SRC_DIR="$(cd -- "${BTSPEAKER_SRC_DIR}" >/dev/null 2>&1 && pwd)"
+		SRC_MODE="env"
+		return 0
+	fi
+	SRC_DIR=""
+	SRC_MODE="download"
+}
+
+fetch_source() {
+	if [ "$SRC_MODE" = "local" ]; then
+		info "使用本地源码目录：$SRC_DIR"
+		return 0
+	fi
+	if [ "$SRC_MODE" = "env" ]; then
+		info "使用 BTSPEAKER_SRC_DIR 指定目录：$SRC_DIR"
+		return 0
+	fi
+
+	info "未检测到本地仓库文件（curl | bash 模式），将从 GitHub 下载源码包"
+	if [ "$DRY_RUN" = 1 ]; then
+		printf '  [dry-run] 下载 %s\n' "$TARBALL_URL"
+		printf '  [dry-run] 解压到临时目录并进入 btspeaker-main/\n'
+		SRC_DIR="<自动下载的源码目录>"
+		return 0
+	fi
+
+	command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 \
+		|| die "需要 curl 或 wget 才能下载源码包（请先安装：apt install curl）"
+	CLEANUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/btspeaker-install.XXXXXX")" || die "创建临时目录失败"
+	local archive="$CLEANUP_DIR/btspeaker.tar.gz"
+
+	info "下载：$TARBALL_URL"
+	if command -v curl >/dev/null 2>&1; then
+		curl -fL --retry 3 --connect-timeout 15 -o "$archive" "$TARBALL_URL" \
+			|| die "下载失败，请检查网络或稍后重试；也可手动 git clone 后在仓库目录执行 sudo bash install.sh"
+	else
+		wget -O "$archive" "$TARBALL_URL" \
+			|| die "下载失败，请检查网络或稍后重试；也可手动 git clone 后在仓库目录执行 sudo bash install.sh"
+	fi
+
+	tar -xzf "$archive" -C "$CLEANUP_DIR" || die "解压源码包失败"
+	SRC_DIR=""
+	local dir
+	for dir in "$CLEANUP_DIR"/*/; do
+		if [ -f "$dir/install.sh" ] && [ -f "$dir/btspeaker/__init__.py" ]; then
+			SRC_DIR="${dir%/}"
+			break
+		fi
+	done
+	[ -n "$SRC_DIR" ] || die "源码包结构异常（未找到 btspeaker/ 与 install.sh）"
+	info "源码已解压：$SRC_DIR"
+}
 
 # --------------------------------------------------------------------------- #
-# 前置检查
-if [ ! -d "$SCRIPT_DIR/$PKG_NAME" ]; then
-	die "在 $SCRIPT_DIR 下找不到 $PKG_NAME 程序目录，请在项目根目录运行本脚本"
-fi
-if [ ! -f "$SCRIPT_DIR/scripts/init.d-btspeaker" ]; then
-	die "缺少 scripts/init.d-btspeaker，安装包不完整"
-fi
-if [ ! -f "$SCRIPT_DIR/scripts/btspeaker-launcher.sh" ]; then
-	die "缺少 scripts/btspeaker-launcher.sh，安装包不完整"
-fi
-
-if [ "$(id -u 2>/dev/null || echo 1)" -ne 0 ]; then
-	if [ "$DRY_RUN" = 1 ]; then
-		warn "当前不是 root，--dry-run 仅预览，不会修改系统"
-	else
-		die "请以 root 身份运行：sudo sh install.sh"
+# 发行版检测
+PM=""
+DISTRO="未知发行版"
+detect_distro() {
+	if command -v apt-get >/dev/null 2>&1; then
+		PM="apt"
+	elif command -v dnf >/dev/null 2>&1; then
+		PM="dnf"
+	elif command -v pacman >/dev/null 2>&1; then
+		PM="pacman"
+	elif command -v zypper >/dev/null 2>&1; then
+		PM="zypper"
 	fi
-fi
+	if [ -r /etc/os-release ]; then
+		# shellcheck disable=SC1091
+		. /etc/os-release
+		DISTRO="${PRETTY_NAME:-${ID:-未知发行版}}"
+	fi
+}
 
-info "蓝音管家 BTSpeaker 安装程序 v$VERSION"
-if [ "$DRY_RUN" = 1 ]; then
-	info "当前为 --dry-run 预览模式，不会改动系统"
-fi
-
-if [ -f /etc/openwrt_release ]; then
-	# shellcheck disable=SC1091
-	. /etc/openwrt_release
-	info "检测到系统：${DISTRIB_DESCRIPTION:-OpenWrt}（${DISTRIB_ARCH:-unknown}）"
-else
-	warn "未检测到 /etc/openwrt_release：当前系统可能不是 iStoreOS/OpenWrt"
-	warn "脚本会继续，但 opkg / uci / procd 相关步骤可能失败"
-fi
-
-# 依赖安装
 install_dependencies() {
 	if [ "$NO_DEPS" = 1 ]; then
-		info "已指定 --no-deps，跳过依赖安装"
-		info "如运行缺依赖，请手动执行：opkg install $REQUIRED_PKGS"
+		info "已指定 --no-deps，跳过系统依赖安装"
+		info "如后续缺依赖，可手动执行：sudo bash $INSTALL_DIR/scripts/install-deps.sh"
 		return 0
 	fi
-	if ! command -v opkg >/dev/null 2>&1; then
-		warn "未找到 opkg，跳过依赖安装（非 OpenWrt 系统可忽略）"
-		warn "OpenWrt 上请手动安装：opkg install $REQUIRED_PKGS"
-		return 0
-	fi
+
+	local extra=""
+	[ "$OPTIONAL" = 1 ] && extra="、espeak-ng、ffmpeg（可选）"
+	info "安装运行时依赖：python3、bluez、bluez-alsa、alsa-utils、mpg123${extra}"
+
 	if [ "$DRY_RUN" = 1 ]; then
-		printf '  [dry-run] opkg update\n'
-		printf '  [dry-run] opkg install %s\n' "$REQUIRED_PKGS"
+		if [ -z "$PM" ]; then
+			printf '  [dry-run] 未检测到 apt/dnf/pacman/zypper，将提示手动安装依赖\n'
+		else
+			printf '  [dry-run] %s（若检测到下载的源码目录，则执行 scripts/install-deps.sh）\n' \
+				"bash $SRC_DIR/scripts/install-deps.sh$([ "$OPTIONAL" = 1 ] && echo ' --optional')"
+		fi
 		return 0
 	fi
 
-	info "更新 opkg 软件源索引 ..."
-	opkg update || warn "opkg update 失败，继续尝试安装（可能使用旧索引）"
-
-	info "安装依赖包：$REQUIRED_PKGS"
-	if opkg install $REQUIRED_PKGS; then
-		ok "依赖安装完成"
+	if [ -f "$SRC_DIR/scripts/install-deps.sh" ]; then
+		if [ "$OPTIONAL" = 1 ]; then
+			bash "$SRC_DIR/scripts/install-deps.sh" --optional || warn "依赖安装未全部成功，可稍后重试：sudo bash $INSTALL_DIR/scripts/install-deps.sh --optional"
+		else
+			bash "$SRC_DIR/scripts/install-deps.sh" || warn "依赖安装未全部成功，可稍后重试：sudo bash $INSTALL_DIR/scripts/install-deps.sh"
+		fi
 	else
-		warn "批量安装失败，改为逐个安装并跳过固件源中不存在的包 ..."
-		for pkg in $REQUIRED_PKGS; do
-			if opkg install "$pkg" >/tmp/btspeaker-opkg.log 2>&1; then
-				ok "已安装 $pkg"
-			else
-				warn "未能安装 $pkg（可能当前固件源没有该包），可稍后手动安装"
-			fi
-		done
+		warn "安装包中缺少 scripts/install-deps.sh，跳过依赖安装"
+		warn "请手动安装：python3 bluez bluez-alsa alsa-utils mpg123"
 	fi
 }
 
-check_optional_tools() {
-	info "检查可选增强工具 ..."
-	if command -v espeak >/dev/null 2>&1; then
-		ok "espeak 已安装（离线 TTS 兜底可用）"
-	else
-		info "可选：未安装 espeak（离线 TTS 兜底，opkg install espeak）"
-	fi
-	if command -v ffmpeg >/dev/null 2>&1; then
-		ok "ffmpeg 已安装（非 mp3/wav 格式转码可用）"
-	else
-		info "可选：未安装 ffmpeg（仅非 mp3/wav 格式需要，opkg install ffmpeg）"
-	fi
-}
-
+# --------------------------------------------------------------------------- #
 create_dirs() {
 	info "创建目录 ..."
-	for dir in "$PREFIX_LIB" "$SHARE_DIR" "$SOUND_DIR" "$SCRIPTS_DIR" \
-		"$DATA_DIR" "$DATA_DIR/sounds" "$DATA_DIR/tmp"; do
-		run mkdir -p "$dir"
-	done
+	run mkdir -p "$INSTALL_DIR" "$DATA_DIR" "$DATA_DIR/sounds" "$DATA_DIR/tmp" "$SOUND_DIR"
 }
 
-install_package() {
-	info "安装 Python 包到 $PREFIX_LIB/$PKG_NAME ..."
+install_program() {
+	info "部署程序到 $INSTALL_DIR/btspeaker ..."
 	if [ "$DRY_RUN" = 1 ]; then
-		printf '  [dry-run] rm -rf %s\n' "$PREFIX_LIB/$PKG_NAME"
-	else
-		rm -rf "$PREFIX_LIB/$PKG_NAME"
+		printf '  [dry-run] rm -rf %s/btspeaker\n' "$INSTALL_DIR"
+		printf '  [dry-run] cp -R %s/btspeaker %s/\n' "$SRC_DIR" "$INSTALL_DIR"
+		printf '  [dry-run] cp -R %s/scripts %s/scripts\n' "$SRC_DIR" "$INSTALL_DIR"
+		printf '  [dry-run] cp -R %s/assets/sounds/. %s/\n' "$SRC_DIR" "$SOUND_DIR"
+		printf '  [dry-run] 清理 __pycache__ 并修正文件权限\n'
+		return 0
 	fi
-	run cp -R "$SCRIPT_DIR/$PKG_NAME" "$PREFIX_LIB/"
-	if [ "$DRY_RUN" = 0 ]; then
-		# 清理开发机可能带入的字节码缓存
-		find "$PREFIX_LIB/$PKG_NAME" -type d -name '__pycache__' -prune -exec rm -rf {} \; 2>/dev/null || true
+	run rm -rf "$INSTALL_DIR/btspeaker"
+	run cp -R "$SRC_DIR/btspeaker" "$INSTALL_DIR/"
+	if [ -d "$SRC_DIR/scripts" ]; then
+		run rm -rf "$INSTALL_DIR/scripts"
+		run cp -R "$SRC_DIR/scripts" "$INSTALL_DIR/scripts"
 	fi
+	if [ -d "$SRC_DIR/assets/sounds" ]; then
+		run cp -R "$SRC_DIR/assets/sounds/." "$SOUND_DIR/"
+	fi
+	find "$INSTALL_DIR/btspeaker" -type d -name '__pycache__' -prune -exec rm -rf {} \; 2>/dev/null || true
+	chmod -R a+rX "$INSTALL_DIR/btspeaker" 2>/dev/null || true
 }
 
 install_launcher() {
-	info "安装启动器：$PREFIX_BIN ..."
-	run cp "$SCRIPT_DIR/scripts/btspeaker-launcher.sh" "$PREFIX_BIN"
-	run chmod 0755 "$PREFIX_BIN"
-}
-
-install_init_script() {
-	info "安装 procd 启动脚本：$INIT_SCRIPT ..."
-	run cp "$SCRIPT_DIR/scripts/init.d-btspeaker" "$INIT_SCRIPT"
-	run chmod 0755 "$INIT_SCRIPT"
-}
-
-install_diag_script() {
-	if [ -f "$SCRIPT_DIR/scripts/bt-diag.sh" ]; then
-		info "安装蓝牙诊断脚本：$SCRIPTS_DIR/bt-diag.sh ..."
-		run cp "$SCRIPT_DIR/scripts/bt-diag.sh" "$SCRIPTS_DIR/bt-diag.sh"
-		run chmod 0755 "$SCRIPTS_DIR/bt-diag.sh"
+	info "安装启动器：$LAUNCHER ..."
+	if [ "$DRY_RUN" = 1 ]; then
+		printf '  [dry-run] cp %s/packaging/bin/btspeaker %s\n' "$SRC_DIR" "$LAUNCHER"
+		printf '  [dry-run] chmod 0755 %s\n' "$LAUNCHER"
+		return 0
 	fi
-	if [ -f "$SCRIPT_DIR/scripts/install-deps.sh" ]; then
-		info "安装依赖安装脚本：$SCRIPTS_DIR/install-deps.sh ..."
-		run cp "$SCRIPT_DIR/scripts/install-deps.sh" "$SCRIPTS_DIR/install-deps.sh"
-		run chmod 0755 "$SCRIPTS_DIR/install-deps.sh"
-	fi
-}
-
-install_sounds() {
-	if [ -d "$SCRIPT_DIR/assets/sounds" ] && [ -n "$(ls -A "$SCRIPT_DIR/assets/sounds" 2>/dev/null)" ]; then
-		info "安装内置声音库到 $SOUND_DIR ..."
-		run cp -R "$SCRIPT_DIR/assets/sounds/." "$SOUND_DIR/"
+	if [ -f "$SRC_DIR/packaging/bin/btspeaker" ]; then
+		run cp "$SRC_DIR/packaging/bin/btspeaker" "$LAUNCHER"
 	else
-		warn "未找到内置声音（assets/sounds 为空），声音库暂时为空"
-		warn "可自行放入 mp3/wav 文件：$SOUND_DIR 或 $DATA_DIR/sounds"
+		warn "缺少 packaging/bin/btspeaker，生成等价启动器"
+		cat > "$LAUNCHER" <<'LAUNCHER_EOF'
+#!/bin/sh
+set -u
+PYTHON="${BTSPEAKER_PYTHON:-/usr/bin/python3}"
+LIB_DIR="${BTSPEAKER_LIB:-/opt/btspeaker}"
+[ -x "$PYTHON" ] || PYTHON="$(command -v python3 2>/dev/null || true)"
+[ -n "$PYTHON" ] && [ -x "$PYTHON" ] || { echo "错误：未找到 python3" >&2; exit 127; }
+if [ -n "${PYTHONPATH:-}" ]; then PYTHONPATH="$LIB_DIR:$PYTHONPATH"; else PYTHONPATH="$LIB_DIR"; fi
+export PYTHONPATH PYTHONIOENCODING="${PYTHONIOENCODING:-utf-8}" PYTHONUNBUFFERED=1
+exec "$PYTHON" -m btspeaker "$@"
+LAUNCHER_EOF
+	fi
+	run chmod 0755 "$LAUNCHER"
+}
+
+install_unit() {
+	info "安装 systemd 单元：$UNIT_FILE ..."
+	if [ "$DRY_RUN" = 1 ]; then
+		printf '  [dry-run] cp %s/packaging/systemd/btspeaker.service %s\n' "$SRC_DIR" "$UNIT_FILE"
+		printf '  [dry-run] chmod 0644 %s\n' "$UNIT_FILE"
+		return 0
+	fi
+	if [ -f "$SRC_DIR/packaging/systemd/btspeaker.service" ]; then
+		run cp "$SRC_DIR/packaging/systemd/btspeaker.service" "$UNIT_FILE"
+		run chmod 0644 "$UNIT_FILE"
+	else
+		warn "缺少 packaging/systemd/btspeaker.service，跳过 systemd 单元安装"
 	fi
 }
 
-seed_data_dir() {
+seed_data() {
 	info "初始化数据目录 $DATA_DIR（config.json + 5 条示例规则，规则默认停用）..."
 	if [ "$DRY_RUN" = 1 ]; then
-		printf '  [dry-run] %s seed --data-dir %s\n' "$PREFIX_BIN" "$DATA_DIR"
+		printf '  [dry-run] PYTHONPATH=%s python3 -m btspeaker seed --data-dir %s\n' "$INSTALL_DIR" "$DATA_DIR"
 		return 0
 	fi
-	if [ ! -x "$PREFIX_BIN" ]; then
-		warn "启动器 $PREFIX_BIN 不存在，跳过数据目录初始化（服务首次启动时会自动初始化）"
+	local python_bin
+	python_bin="$(command -v python3 2>/dev/null || true)"
+	if [ -z "$python_bin" ]; then
+		warn "未找到 python3，跳过数据目录初始化（安装 python3 后执行：sudo PYTHONPATH=$INSTALL_DIR python3 -m btspeaker seed --data-dir $DATA_DIR）"
 		return 0
 	fi
-	# btspeaker seed 幂等：配置/规则已存在时保持不动，重复安装不会覆盖用户数据
-	if "$PREFIX_BIN" seed --data-dir "$DATA_DIR"; then
+	if PYTHONPATH="$INSTALL_DIR" "$python_bin" -m btspeaker seed --data-dir "$DATA_DIR"; then
 		ok "数据目录初始化完成"
 	else
-		warn "btspeaker seed 执行失败；服务首次启动时会自动初始化数据目录"
+		warn "数据目录初始化失败；服务首次启动时会自动初始化"
 	fi
 }
 
-add_firewall_rule() {
-	if ! command -v uci >/dev/null 2>&1; then
-		warn "未找到 uci，跳过防火墙配置；请手动放行 TCP $PORT（lan 区域）"
-		return 0
-	fi
+enable_service() {
+	info "注册并启动 systemd 服务 btspeaker ..."
 	if [ "$DRY_RUN" = 1 ]; then
-		printf '  [dry-run] uci set firewall.btspeaker=rule （src=lan, proto=tcp, dest_port=%s, target=ACCEPT）\n' "$PORT"
-		printf '  [dry-run] uci commit firewall && /etc/init.d/firewall reload\n'
+		printf '  [dry-run] systemctl daemon-reload\n'
+		printf '  [dry-run] systemctl enable --now btspeaker\n'
 		return 0
 	fi
-	if ! uci -q get firewall.btspeaker >/dev/null 2>&1; then
-		uci set firewall.btspeaker=rule 2>/dev/null || true
+	if ! command -v systemctl >/dev/null 2>&1; then
+		warn "未检测到 systemd（systemctl）：跳过服务注册"
+		warn "可手动前台运行：sudo $LAUNCHER serve --data-dir $DATA_DIR"
+		return 0
 	fi
-	uci set firewall.btspeaker.name='btspeaker' 2>/dev/null || true
-	uci set firewall.btspeaker.src='lan' 2>/dev/null || true
-	uci set firewall.btspeaker.dest_port="$PORT" 2>/dev/null || true
-	uci set firewall.btspeaker.proto='tcp' 2>/dev/null || true
-	uci set firewall.btspeaker.target='ACCEPT' 2>/dev/null || true
-	if uci commit firewall 2>/dev/null; then
-		/etc/init.d/firewall reload >/dev/null 2>&1 || true
-		ok "防火墙已放行 TCP $PORT（lan 区域）"
+	systemctl daemon-reload || warn "systemctl daemon-reload 失败"
+	systemctl enable --now btspeaker || warn "systemctl enable --now btspeaker 失败"
+	# 重复安装（升级）时确保加载新代码
+	systemctl restart btspeaker || warn "systemctl restart btspeaker 失败"
+	sleep 1
+	if systemctl is-active --quiet btspeaker; then
+		ok "服务已启动（开机自启已启用）"
 	else
-		warn "写入防火墙规则失败，请手动放行 TCP $PORT"
-	fi
-}
-
-enable_and_start() {
-	info "设置开机自启并启动服务 ..."
-	if [ "$DRY_RUN" = 1 ]; then
-		printf '  [dry-run] %s enable\n' "$INIT_SCRIPT"
-		printf '  [dry-run] %s start\n' "$INIT_SCRIPT"
-		return 0
-	fi
-	if [ ! -x "$INIT_SCRIPT" ]; then
-		warn "未找到可执行的 $INIT_SCRIPT，跳过服务启动"
-		return 0
-	fi
-	"$INIT_SCRIPT" enable >/dev/null 2>&1 || warn "设置开机自启失败（可手动 /etc/init.d/btspeaker enable）"
-	"$INIT_SCRIPT" start >/dev/null 2>&1 || true
-	sleep 2
-	if service_running; then
-		ok "服务已启动"
-	else
-		warn "服务可能未启动成功，请执行 /etc/init.d/btspeaker status 并查看 $DATA_DIR/btspeaker.log"
+		warn "服务可能未启动成功，请查看：journalctl -u btspeaker -n 80 --no-pager"
 	fi
 }
 
 check_health() {
 	[ "$DRY_RUN" = 1 ] && return 0
-	_health=""
-	if command -v wget >/dev/null 2>&1; then
-		_health="$(wget -q -O - "http://127.0.0.1:$PORT/api/health" 2>/dev/null || true)"
-	elif command -v curl >/dev/null 2>&1; then
-		_health="$(curl -fsS "http://127.0.0.1:$PORT/api/health" 2>/dev/null || true)"
+	local health=""
+	if command -v curl >/dev/null 2>&1; then
+		health="$(curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/api/health" 2>/dev/null || true)"
+	elif command -v wget >/dev/null 2>&1; then
+		health="$(wget -q -O - "http://127.0.0.1:${PORT}/api/health" 2>/dev/null || true)"
 	fi
-	case "$_health" in
+	case "$health" in
 		*'"status"'*)
-			ok "HTTP 健康检查通过：$_health"
+			ok "HTTP 健康检查通过：$health"
 			;;
 		*)
 			warn "HTTP 健康检查暂未通过（服务可能仍在启动）"
-			warn "稍后可手动验证：wget -qO- http://127.0.0.1:$PORT/api/health"
+			warn "稍后可验证：curl -s http://127.0.0.1:${PORT}/api/health"
 			;;
 	esac
 }
 
+lan_ip() {
+	local ip=""
+	ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+	if [ -z "$ip" ] && command -v ip >/dev/null 2>&1; then
+		ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit }}' || true)"
+	fi
+	[ -n "$ip" ] || ip="<本机 LAN IP>"
+	printf '%s' "$ip"
+}
+
 print_summary() {
-	_lan="$(lan_ip)"
+	local ip
+	ip="$(lan_ip)"
 	cat <<EOF
 
 ============================================================
- $APP_NAME 安装完成（v$VERSION）
+ $APP_NAME 安装完成（Linux / systemd）
 ============================================================
- 访问地址 : http://$_lan:$PORT/
+ 访问地址 : http://$ip:$PORT/
+ 程序目录 : $INSTALL_DIR
  数据目录 : $DATA_DIR
- 程序目录 : $PREFIX_LIB
- 日志文件 : $DATA_DIR/btspeaker.log
- 诊断脚本 : sh $SCRIPTS_DIR/bt-diag.sh
- 服务管理 : $INIT_SCRIPT {start|stop|restart|reload|status|enable|disable}
+ 内置声音 : $SOUND_DIR
+ 服务单元 : $UNIT_FILE
+ 诊断脚本 : sudo sh $INSTALL_DIR/scripts/bt-diag.sh
+ 服务管理 : systemctl {start|stop|restart|status} btspeaker
+             journalctl -u btspeaker -f      # 实时日志
+             sudo systemctl disable btspeaker  # 取消开机自启
 
- 后续步骤：
- 1. 浏览器打开访问地址，进入「音箱」页扫描并配对蓝牙音箱；
- 2. 在「设置」页配置 TTS（在线 HTTP 接口音质最好；也可安装 espeak 离线兜底）；
- 3. 5 条示例规则默认全部停用，确认音箱工作正常后，到「自动化」页逐条启用；
- 4. 若局域网不可信，请在「设置 → 安全」中设置 api_token（命令执行默认关闭）。
+ 后续 3 步：
+ 1. 连音箱：浏览器打开上面的访问地址 →「音箱」页扫描并配对；
+           或命令行：btspeaker devices --scan / btspeaker pair <MAC> / btspeaker connect <MAC>
+ 2. 配 TTS：在「设置」页填写 TTS 服务地址；也可安装 espeak-ng 离线兜底
+           （sudo sh $INSTALL_DIR/scripts/install-deps.sh --optional）
+ 3. 开规则：5 条示例规则默认全部停用，到「自动化」页确认后逐条启用。
 
- 卸载：
-   sh uninstall.sh           保留 $DATA_DIR 配置与数据
-   sh uninstall.sh --purge   同时删除配置与数据
+ 卸载：sudo bash uninstall.sh            # 保留 $DATA_DIR 配置与数据
+       sudo bash uninstall.sh --purge    # 同时删除配置与数据
 ============================================================
 EOF
 }
 
 # --------------------------------------------------------------------------- #
-info "开始安装（目标：iStoreOS / OpenWrt x86_64）"
+# 主流程
+printf '蓝音管家 BTSpeaker —— Linux 一键安装\n'
+if [ "$DRY_RUN" = 1 ]; then
+	info "当前为 --dry-run 预览模式，只打印计划，不会改动系统"
+fi
+
+detect_source
+fetch_source
+
+if [ "$(id -u 2>/dev/null || echo 1)" -ne 0 ]; then
+	if [ "$DRY_RUN" = 1 ]; then
+		warn "当前不是 root：--dry-run 仅预览，正式安装需要 root"
+	else
+		die "请以 root 身份运行：sudo bash install.sh（或 curl ... | sudo bash）"
+	fi
+fi
+
+detect_distro
+info "系统：$DISTRO${PM:+（包管理器：$PM）}"
 
 install_dependencies
-check_optional_tools
 create_dirs
-install_package
+install_program
 install_launcher
-install_init_script
-install_diag_script
-install_sounds
-seed_data_dir
-add_firewall_rule
-enable_and_start
+install_unit
+seed_data
+enable_service
 check_health
 print_summary
 

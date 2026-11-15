@@ -1,18 +1,20 @@
 #!/bin/sh
-# 蓝音管家 BTSpeaker —— 蓝牙链路诊断脚本（iStoreOS / OpenWrt x86_64）
+# 蓝音管家 BTSpeaker —— 蓝牙链路诊断脚本（通用 Linux / systemd）
 #
 # 用法：
-#   sh /usr/lib/btspeaker/scripts/bt-diag.sh
-#   sh bt-diag.sh --port 8722
+#   sh scripts/bt-diag.sh
+#   sh /opt/btspeaker/scripts/bt-diag.sh --port 8722 --token <API_TOKEN>
 #
-# 逐项检查蓝牙/音频链路并给出中文修复建议；退出码 0=全部通过，1=存在失败项。
+# 逐项检查 systemd 服务、端口、蓝牙适配器、BlueALSA、播放工具、声音库与日志，
+# 每项给出中文修复建议。退出码 0=未发现失败项，1=存在失败项。
 
 set -u
 
 PORT=8722
 API_TOKEN=""
-DATA_DIR=/etc/btspeaker
-CONFIG="$DATA_DIR/config.json"
+DATA_DIR="/etc/btspeaker"
+INSTALL_DIR="/opt/btspeaker"
+LAUNCHER="/usr/local/bin/btspeaker"
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -27,14 +29,17 @@ while [ $# -gt 0 ]; do
 		--data-dir)
 			shift
 			DATA_DIR="${1:-/etc/btspeaker}"
-			CONFIG="$DATA_DIR/config.json"
+			;;
+		--install-dir)
+			shift
+			INSTALL_DIR="${1:-/opt/btspeaker}"
 			;;
 		-h|--help)
-			sed -n '2,12p' "$0"
+			sed -n '2,10p' "$0"
 			exit 0
 			;;
 		*)
-			echo "未知参数：$1（可用 --port / --token / --data-dir / --help）"
+			echo "未知参数：$1（可用 --port / --token / --data-dir / --install-dir / --help）"
 			exit 2
 			;;
 	esac
@@ -43,75 +48,120 @@ done
 
 FAILED=0
 
-section() {
-	printf '\n== %s ==\n' "$1"
-}
-
-ok() {
-	printf '  [OK]   %s\n' "$*"
-}
-
-warn() {
-	printf '  [WARN] %s\n' "$*"
-}
-
-fail() {
-	printf '  [FAIL] %s\n' "$*"
-	FAILED=$((FAILED + 1))
-}
-
-hint() {
-	printf '         修复建议：%s\n' "$*"
-}
-
-have() {
-	command -v "$1" >/dev/null 2>&1
-}
+section() { printf '\n== %s ==\n' "$1"; }
+ok()   { printf '  [OK]   %s\n' "$*"; }
+warn() { printf '  [WARN] %s\n' "$*"; }
+fail() { printf '  [FAIL] %s\n' "$*"; FAILED=$((FAILED + 1)); }
+hint() { printf '         修复建议：%s\n' "$*"; }
+have() { command -v "$1" >/dev/null 2>&1; }
 
 # --------------------------------------------------------------------------- #
 section "系统信息"
-if [ -f /etc/openwrt_release ]; then
+if [ -r /etc/os-release ]; then
 	# shellcheck disable=SC1091
-	. /etc/openwrt_release
-	ok "系统：${DISTRIB_DESCRIPTION:-OpenWrt}（${DISTRIB_ARCH:-unknown}）"
+	. /etc/os-release
+	ok "系统：${PRETTY_NAME:-$ID}"
 else
-	warn "未检测到 /etc/openwrt_release：当前系统可能不是 OpenWrt/iStoreOS"
+	warn "未找到 /etc/os-release，无法识别发行版"
 fi
 ok "内核：$(uname -srm 2>/dev/null)"
 ok "当前用户：$(id -un 2>/dev/null)（uid=$(id -u 2>/dev/null)）"
-
-# --------------------------------------------------------------------------- #
-section "BTSpeaker 服务"
-if [ -x /etc/init.d/btspeaker ]; then
-	STATUS="$(/etc/init.d/btspeaker status 2>&1 | head -n 2)"
-	if printf '%s' "$STATUS" | grep -qi 'running'; then
-		ok "procd 服务运行中：$STATUS"
-	else
-		warn "procd 服务状态：${STATUS:-未知}"
-	fi
-else
-	fail "未找到 /etc/init.d/btspeaker（蓝音管家可能未安装）"
-	hint "重新安装：sh install.sh，或上传 btspeaker_<版本>_x86_64.ipk 安装"
+if [ "$(id -u 2>/dev/null || echo 1)" -ne 0 ]; then
+	warn "当前不是 root：蓝牙控制、服务状态查看可能需要 sudo"
+fi
+if ! have systemctl; then
+	warn "未检测到 systemd（本服务按 systemd 单元设计，容器/WSL 中可能需要手动前台运行）"
 fi
 
+# --------------------------------------------------------------------------- #
+section "程序安装"
+if [ -f "$INSTALL_DIR/btspeaker/__init__.py" ]; then
+	ok "程序目录：$INSTALL_DIR/btspeaker"
+else
+	fail "程序目录不存在或缺少 __init__.py：$INSTALL_DIR/btspeaker"
+	hint "重新安装：sudo bash install.sh"
+fi
+if [ -x "$LAUNCHER" ]; then
+	ok "启动器：$LAUNCHER"
+else
+	fail "启动器不存在：$LAUNCHER"
+	hint "重新安装：sudo bash install.sh"
+fi
+if [ -f /etc/systemd/system/btspeaker.service ]; then
+	ok "systemd 单元：/etc/systemd/system/btspeaker.service"
+else
+	fail "systemd 单元不存在：/etc/systemd/system/btspeaker.service"
+	hint "重新安装：sudo bash install.sh（或手动 cp packaging/systemd/btspeaker.service /etc/systemd/system/）"
+fi
+if have python3; then
+	ok "python3：$(python3 --version 2>&1)"
+	if PYTHONPATH="$INSTALL_DIR" python3 -c "import btspeaker; print(btspeaker.__version__)" >/tmp/btspeaker-diag-import.txt 2>/dev/null; then
+		ok "Python 包导入正常（btspeaker $(cat /tmp/btspeaker-diag-import.txt)）"
+	else
+		fail "无法 import btspeaker"
+		hint "检查 $INSTALL_DIR/btspeaker 是否完整；缺标准库模块时按发行版安装 python3"
+	fi
+else
+	fail "未安装 python3"
+	hint "Debian/Ubuntu: apt install python3；Fedora: dnf install python3；Arch: pacman -S python"
+fi
+
+# --------------------------------------------------------------------------- #
+section "systemd 服务状态"
+if have systemctl; then
+	if systemctl is-active --quiet btspeaker 2>/dev/null; then
+		ok "服务运行中（active）；开机自启：$(systemctl is-enabled btspeaker 2>/dev/null || echo '未启用')"
+	else
+		fail "服务未运行（systemctl is-active btspeaker 非 active）"
+		hint "启动：sudo systemctl start btspeaker；失败原因看：journalctl -u btspeaker -n 50 --no-pager"
+	fi
+	if systemctl is-enabled --quiet btspeaker 2>/dev/null; then
+		ok "已设置开机自启"
+	else
+		warn "未设置开机自启"
+		hint "sudo systemctl enable btspeaker"
+	fi
+	STATUS_HEAD="$(systemctl status btspeaker --no-pager -n 0 2>/dev/null | head -n 4)"
+	[ -n "$STATUS_HEAD" ] && printf '%s\n' "$STATUS_HEAD" | sed 's/^/         /'
+else
+	warn "跳过 systemd 检查（无 systemctl）"
+fi
 if pgrep -f 'btspeaker serve' >/dev/null 2>&1; then
 	ok "进程存在：$(pgrep -f 'btspeaker serve' | tr '\n' ' ')"
 else
 	fail "未发现 btspeaker serve 进程"
-	hint "启动服务：/etc/init.d/btspeaker start；失败时看日志 /etc/btspeaker/btspeaker.log"
+	hint "查看日志：journalctl -u btspeaker -n 80 --no-pager；数据日志：$DATA_DIR/btspeaker.log"
 fi
 
+# --------------------------------------------------------------------------- #
+section "端口与 HTTP 接口"
 LISTEN=""
-if have netstat; then
-	LISTEN="$(netstat -lnt 2>/dev/null | grep -E "[:.]${PORT}[[:space:]]" || true)"
-elif have ss; then
-	LISTEN="$(ss -lnt 2>/dev/null | grep -E "[:.]${PORT}[[:space:]]" || true)"
+if have ss; then
+	LISTEN="$(ss -lntp 2>/dev/null | grep -E "[:.]${PORT}[[:space:]]" || true)"
+elif have netstat; then
+	LISTEN="$(netstat -lntp 2>/dev/null | grep -E "[:.]${PORT}[[:space:]]" || true)"
 fi
 if [ -n "$LISTEN" ]; then
 	ok "端口 $PORT 正在监听"
 else
 	fail "端口 $PORT 未监听"
-	hint "服务未启动或端口被改：检查 $CONFIG 中 server.port，并重启服务"
+	hint "服务未启动或端口被修改：检查 $DATA_DIR/config.json 的 server.port，然后 sudo systemctl restart btspeaker"
+fi
+HEALTH=""
+if have curl; then
+	if [ -n "$API_TOKEN" ]; then
+		HEALTH="$(curl -fsS -H "X-Api-Token: $API_TOKEN" "http://127.0.0.1:${PORT}/api/health" 2>/dev/null || true)"
+	else
+		HEALTH="$(curl -fsS "http://127.0.0.1:${PORT}/api/health" 2>/dev/null || true)"
+	fi
+elif have wget; then
+	HEALTH="$(wget -q -O - "http://127.0.0.1:${PORT}/api/health" 2>/dev/null || true)"
+fi
+if printf '%s' "$HEALTH" | grep -q '"status"'; then
+	ok "健康检查通过：$HEALTH"
+else
+	fail "无法访问 http://127.0.0.1:${PORT}/api/health"
+	hint "服务未启动、端口不对或被防火墙拦截；先看 journalctl -u btspeaker -n 80 --no-pager"
 fi
 
 # --------------------------------------------------------------------------- #
@@ -126,33 +176,42 @@ if have bluetoothctl; then
 				ok "适配器已上电（Powered: yes）"
 			else
 				fail "适配器未上电"
-				hint "执行：bluetoothctl power on（或 hciconfig hci0 up）"
-			fi
-			if grep -qi 'Discovering: yes' /tmp/btspeaker-diag-btctl.txt; then
-				warn "适配器正在扫描（可能影响连接稳定性）"
+				hint "sudo bluetoothctl power on（或 sudo hciconfig hci0 up）"
 			fi
 		else
-			fail "bluetoothctl show 未返回 Controller，适配器可能未识别"
-			hint "检查 dmesg | grep -i bluetooth、lsusb；确认 kmod-bluetooth / kmod-btusb 已安装"
+			fail "bluetoothctl show 未返回 Controller，适配器可能未被识别"
+			hint "检查：lsusb | grep -i bluetooth、dmesg | tail -30；确认 bluez 已安装且 bluetooth 服务已启动"
 		fi
 	else
 		fail "bluetoothctl show 执行失败"
-		hint "确认 bluez-daemon 已安装并启动：/etc/init.d/bluetooth start"
+		hint "sudo systemctl start bluetooth；再 sudo systemctl status bluetooth"
 	fi
 else
-	fail "未安装 bluetoothctl"
-	hint "opkg update && opkg install bluez-daemon bluez-utils kmod-bluetooth kmod-btusb"
+	fail "未安装 bluetoothctl（bluez 未安装）"
+	hint "Debian/Ubuntu: apt install bluez；Fedora: dnf install bluez；Arch: pacman -S bluez"
 fi
-
-if have hciconfig; then
-	HCI="$(hciconfig 2>/dev/null | grep -E '^hci[0-9]+' | head -n 5)"
-	if [ -n "$HCI" ]; then
-		ok "hciconfig：$(printf '%s' "$HCI" | head -n 1)"
+if have systemctl; then
+	BT_STATE="$(systemctl is-active bluetooth 2>/dev/null || true)"
+	if [ "$BT_STATE" = "active" ]; then
+		ok "bluetooth 服务运行中"
 	else
-		warn "hciconfig 未发现适配器（内核模块可能未加载）"
+		fail "bluetooth 服务未运行（状态：${BT_STATE:-unknown}）"
+		hint "sudo systemctl enable --now bluetooth"
 	fi
-else
-	warn "未安装 hciconfig（bluez-utils 提供，可选）"
+fi
+if have rfkill; then
+	RF="$(rfkill list bluetooth 2>/dev/null | head -n 6)"
+	if [ -n "$RF" ]; then
+		printf '%s\n' "$RF" | sed 's/^/         /'
+		if printf '%s' "$RF" | grep -qi 'Soft blocked: yes'; then
+			warn "蓝牙被软件禁用（Soft blocked: yes）"
+			hint "sudo rfkill unblock bluetooth"
+		fi
+		if printf '%s' "$RF" | grep -qi 'Hard blocked: yes'; then
+			fail "蓝牙被硬件开关/BIOS 禁用（Hard blocked: yes）"
+			hint "检查笔记本蓝牙开关、BIOS 设置或 USB 适配器"
+		fi
+	fi
 fi
 
 # --------------------------------------------------------------------------- #
@@ -161,40 +220,46 @@ if have bluetoothctl; then
 	DEVS="$(timeout 8 bluetoothctl devices 2>/dev/null || true)"
 	if [ -n "$DEVS" ]; then
 		printf '%s\n' "$DEVS" | sed 's/^/         /'
-		CONNECTED_LINE="$(printf '%s\n' "$DEVS" | head -n 1 | awk '{print $2}')"
-		if [ -n "$CONNECTED_LINE" ]; then
-			INFO="$(timeout 8 bluetoothctl info "$CONNECTED_LINE" 2>/dev/null || true)"
+		FIRST_ADDR="$(printf '%s\n' "$DEVS" | head -n 1 | awk '{print $2}')"
+		if [ -n "$FIRST_ADDR" ]; then
+			INFO="$(timeout 8 bluetoothctl info "$FIRST_ADDR" 2>/dev/null || true)"
 			if printf '%s' "$INFO" | grep -qi 'Connected: yes'; then
-				ok "音箱已连接：$CONNECTED_LINE"
+				ok "音箱已连接：$FIRST_ADDR"
 			else
-				warn "音箱未连接：$CONNECTED_LINE"
-				hint "连接：bluetoothctl connect $CONNECTED_LINE（在 Web 界面 #/devices 页也可操作）"
+				warn "首个音箱未连接：$FIRST_ADDR"
+				hint "sudo bluetoothctl connect $FIRST_ADDR（或在 Web 界面「音箱」页操作）"
 			fi
 			if printf '%s' "$INFO" | grep -qi 'Paired: yes'; then
-				ok "已配对：$CONNECTED_LINE"
+				ok "已配对：$FIRST_ADDR"
 			else
-				warn "未配对：$CONNECTED_LINE"
-				hint "配对：bluetoothctl pair $CONNECTED_LINE && bluetoothctl trust $CONNECTED_LINE"
+				warn "未配对：$FIRST_ADDR"
+				hint "sudo bluetoothctl pair $FIRST_ADDR && sudo bluetoothctl trust $FIRST_ADDR"
 			fi
 		fi
 	else
-		fail "没有已配对/已发现的设备"
-		hint "先让音箱进入配对模式，再在 Web 界面 #/devices 页点击扫描并配对"
+		fail "没有已配对/已发现的蓝牙设备"
+		hint "让音箱进入配对模式，然后在 Web 界面「音箱」页点扫描并配对"
 	fi
 else
-	warn "跳过配对检查：bluetoothctl 不可用"
+	warn "跳过配对检查（bluetoothctl 不可用）"
 fi
-
-if [ -f "$CONFIG" ]; then
-	DEFAULT_DEV="$(sed -n 's/.*"default_device"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CONFIG" | head -n 1)"
+if [ -f "$DATA_DIR/config.json" ] && have python3; then
+	DEFAULT_DEV="$(python3 - "$DATA_DIR/config.json" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        cfg = json.load(f)
+    print(((cfg.get("bluetooth") or {}).get("default_device") or ""))
+except Exception:
+    pass
+PY
+)"
 	if [ -n "$DEFAULT_DEV" ]; then
 		ok "默认音箱（配置）：$DEFAULT_DEV"
 	else
-		warn "未设置默认音箱（config.json 中 bluetooth.default_device 为空）"
-		hint "在 Web 界面 #/devices 页把常用音箱设为默认，或调用 POST /api/bluetooth/default"
+		warn "未设置默认音箱（bluetooth.default_device 为空）"
+		hint "在 Web 界面「音箱」页设为默认，或：btspeaker default <MAC>"
 	fi
-else
-	warn "配置文件不存在：$CONFIG"
 fi
 
 # --------------------------------------------------------------------------- #
@@ -203,26 +268,30 @@ if pgrep -f bluealsa >/dev/null 2>&1; then
 	ok "bluealsa 进程运行中：$(pgrep -f bluealsa | tr '\n' ' ')"
 else
 	fail "bluealsa 未运行"
-	hint "启动：/etc/init.d/bluealsa start（或手工 /usr/bin/bluealsa -p a2dp-sink &）"
-	hint "确认已安装：opkg install bluealsa"
+	hint "启动：sudo systemctl enable --now bluealsa（部分发行版服务名为 bluez-alsa.service）"
+	hint "Debian/Ubuntu 包名 bluez-alsa-utils；Fedora/Arch/openSUSE 包名 bluez-alsa"
 fi
-
-if [ -x /etc/init.d/bluealsa ]; then
-	ok "bluealsa 服务脚本：/etc/init.d/bluealsa"
-else
-	warn "未找到 /etc/init.d/bluealsa（部分固件需要手工启动 bluealsa）"
+if have systemctl; then
+	BA_STATE="$(systemctl is-active bluealsa 2>/dev/null || systemctl is-active bluez-alsa 2>/dev/null || true)"
+	if [ "$BA_STATE" = "active" ]; then
+		ok "bluealsa systemd 服务运行中"
+	elif pgrep -f bluealsa >/dev/null 2>&1; then
+		warn "bluealsa 进程存在但不是由 systemd 管理（可接受）"
+	else
+		warn "bluealsa systemd 服务未运行（状态：${BA_STATE:-不存在该服务}）"
+		hint "查找服务：systemctl list-unit-files | grep -i -E 'bluealsa|bluez-alsa'"
+	fi
 fi
-
 if have aplay; then
 	if aplay -L 2>/dev/null | grep -qi bluealsa; then
 		ok "ALSA 已识别 bluealsa PCM"
 	else
 		fail "aplay -L 中没有 bluealsa PCM"
-		hint "确认 bluealsa 正在运行且已连接音箱；必要时重启 bluealsa 后重试"
+		hint "① 确认 bluealsa 正在运行；② 确认蓝牙音箱已连接（BlueALSA 仅在 A2DP 设备连接后暴露 PCM）"
 	fi
 else
-	fail "未安装 aplay"
-	hint "opkg install alsa-utils"
+	fail "未安装 aplay（alsa-utils）"
+	hint "Debian/Ubuntu: apt install alsa-utils；Fedora: dnf install alsa-utils；Arch: pacman -S alsa-utils"
 fi
 
 # --------------------------------------------------------------------------- #
@@ -232,35 +301,53 @@ if have mpg123; then
 	if mpg123 --list-modules 2>/dev/null | grep -qi alsa; then
 		ok "mpg123 支持 alsa 输出模块"
 	elif mpg123 --longhelp 2>&1 | grep -qi 'alsa'; then
-		ok "mpg123 帮助信息中包含 alsa 输出（推测支持）"
+		ok "mpg123 帮助信息包含 alsa（推测支持）"
 	else
 		warn "mpg123 未显示 alsa 输出模块"
-		hint "若播放 mp3 无声：opkg install --force-reinstall mpg123，或改用 wav + aplay"
+		hint "重新安装：apt install --reinstall mpg123（Fedora: dnf reinstall mpg123）；或改用 wav + aplay 播放"
 	fi
 else
 	fail "未安装 mpg123"
-	hint "opkg install mpg123"
+	hint "Debian/Ubuntu: apt install mpg123；Fedora: dnf install mpg123；Arch: pacman -S mpg123"
 fi
-
 if have ffmpeg; then
-	ok "ffmpeg：$(command -v ffmpeg)（可用于 ogg/其它格式转码）"
+	ok "ffmpeg 已安装（非 mp3/wav 格式转码可用）"
 else
-	warn "未安装 ffmpeg（可选，仅非 mp3/wav 格式需要）"
-	hint "opkg install ffmpeg"
+	warn "未安装 ffmpeg（可选，仅 ogg/flac 等格式需要）"
+	hint "sudo sh $INSTALL_DIR/scripts/install-deps.sh --optional"
 fi
-
-if have espeak; then
-	ok "espeak：$(command -v espeak)（离线 TTS 兜底可用）"
+if have espeak-ng || have espeak; then
+	ok "espeak-ng/espeak 已安装（离线 TTS 兜底）"
 else
-	warn "未安装 espeak（可选；推荐配置在线 TTS 服务，音质更好）"
-	hint "opkg install espeak，并在 Web 设置页把 TTS 后端设为 espeak"
+	warn "未安装 espeak-ng（可选；推荐配置在线 TTS，音质更好）"
+	hint "sudo sh $INSTALL_DIR/scripts/install-deps.sh --optional"
 fi
 
 # --------------------------------------------------------------------------- #
-section "声音库"
+section "数据目录与声音库"
+if [ -d "$DATA_DIR" ]; then
+	ok "数据目录：$DATA_DIR"
+	if [ -w "$DATA_DIR" ]; then
+		ok "数据目录可写"
+	else
+		fail "数据目录不可写（服务以 root 运行，普通用户查看时属正常）"
+		hint "sudo chown root:root $DATA_DIR && sudo chmod 755 $DATA_DIR"
+	fi
+	for f in config.json rules.json; do
+		if [ -f "$DATA_DIR/$f" ]; then
+			ok "存在 $DATA_DIR/$f"
+		else
+			warn "缺少 $DATA_DIR/$f"
+			hint "初始化：sudo PYTHONPATH=$INSTALL_DIR python3 -m btspeaker seed --data-dir $DATA_DIR"
+		fi
+	done
+else
+	fail "数据目录不存在：$DATA_DIR"
+	hint "重新安装：sudo bash install.sh（会自动创建并初始化）"
+fi
 if [ -d /usr/share/btspeaker/sounds ]; then
 	COUNT="$(ls -1 /usr/share/btspeaker/sounds 2>/dev/null | wc -l | tr -d ' ')"
-	ok "安装内置声音库：/usr/share/btspeaker/sounds（${COUNT} 个文件）"
+	ok "内置声音库：/usr/share/btspeaker/sounds（${COUNT} 个文件）"
 else
 	warn "内置声音库目录不存在：/usr/share/btspeaker/sounds"
 fi
@@ -272,48 +359,29 @@ else
 fi
 
 # --------------------------------------------------------------------------- #
-section "HTTP 接口"
-if have wget; then
-	HEALTH="$(wget -q -O - "http://127.0.0.1:${PORT}/api/health" 2>/dev/null || true)"
-elif have curl; then
-	HEALTH="$(curl -fsS "http://127.0.0.1:${PORT}/api/health" 2>/dev/null || true)"
-else
-	HEALTH=""
-fi
-if printf '%s' "$HEALTH" | grep -q '"status"'; then
-	ok "健康检查通过：$HEALTH"
-else
-	fail "无法访问 http://127.0.0.1:${PORT}/api/health"
-	hint "服务未启动或端口不对；查看日志与端口监听"
-fi
-if [ -n "$API_TOKEN" ]; then
-	ok "已提供 API Token（仅用于诊断提示，脚本不会打印 Token）"
-fi
-
-# --------------------------------------------------------------------------- #
 section "日志（最近 30 行）"
-if [ -f "$DATA_DIR/btspeaker.log" ]; then
-	ok "日志文件：$DATA_DIR/btspeaker.log"
-	tail -n 30 "$DATA_DIR/btspeaker.log" 2>/dev/null | sed 's/^/         /'
-else
-	warn "日志文件不存在：$DATA_DIR/btspeaker.log"
-	hint "启动服务后日志会写入该文件；也可用 logread | grep -i btspeaker 查看"
-fi
-if have logread; then
-	SYSLOG="$(logread -e btspeaker 2>/dev/null | tail -n 10)"
-	if [ -n "$SYSLOG" ]; then
-		printf '%s\n' "$SYSLOG" | sed 's/^/         /'
+if have journalctl; then
+	JLOG="$(journalctl -u btspeaker -n 30 --no-pager 2>/dev/null | tail -n 30)"
+	if [ -n "$JLOG" ]; then
+		ok "journalctl -u btspeaker："
+		printf '%s\n' "$JLOG" | sed 's/^/         /'
 	fi
+fi
+if [ -f "$DATA_DIR/btspeaker.log" ]; then
+	ok "服务日志：$DATA_DIR/btspeaker.log（尾部 20 行）"
+	tail -n 20 "$DATA_DIR/btspeaker.log" 2>/dev/null | sed 's/^/         /'
+else
+	warn "服务日志不存在：$DATA_DIR/btspeaker.log"
 fi
 
 # --------------------------------------------------------------------------- #
 section "诊断结论"
 if [ "$FAILED" -eq 0 ]; then
-	echo "  未发现失败项，蓝牙播放链路看起来正常。"
-	echo "  如果仍然没有声音：确认音箱音量、在 Web 界面点一次「播放提示音」测试。"
+	echo "  未发现失败项，服务与蓝牙播放链路看起来正常。"
+	echo "  如仍无声：确认音箱音量/输入源，在 Web 界面点一次「播放提示音」测试。"
 	exit 0
 else
 	echo "  共发现 $FAILED 个失败项，请按上面的修复建议逐条处理。"
-	echo "  仍无法解决时，把本脚本输出和 $DATA_DIR/btspeaker.log 尾部一起提供。"
+	echo "  仍未解决时，附上本脚本输出与：journalctl -u btspeaker -n 100 --no-pager"
 	exit 1
 fi

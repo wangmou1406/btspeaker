@@ -1,12 +1,13 @@
-# 安装指南 —— 蓝音管家 BTSpeaker
+# 安装指南 —— 蓝音管家 BTSpeaker（Linux）
 
-本文面向 iStoreOS / OpenWrt x86_64 用户，覆盖三种安装方式、依赖说明、手动安装、开机自启、防火墙、验证、升级与回滚。
+本文覆盖普通 Linux（systemd 发行版）的安装、依赖说明、手动步骤、systemd 管理、防火墙、验证、升级与回滚。
 
 - 产品：蓝音管家 BTSpeaker（纯 Python 标准库 Web 服务）
-- 目标系统：iStoreOS（或 OpenWrt 23.05+）x86_64
+- 目标系统：Debian / Ubuntu、Fedora、Arch Linux、openSUSE 等 systemd 发行版
 - 默认端口：`8722`（TCP，监听 `0.0.0.0`）
-- 安装路径：`/usr/lib/btspeaker`；启动器 `/usr/bin/btspeaker`；服务名 `btspeaker`
+- 安装路径：`/opt/btspeaker`；启动器 `/usr/local/bin/btspeaker`；服务名 `btspeaker`
 - 数据目录：`/etc/btspeaker`
+- 服务单元：`/etc/systemd/system/btspeaker.service`
 
 ---
 
@@ -14,329 +15,279 @@
 
 | 项目 | 要求 | 检查命令 |
 | --- | --- | --- |
-| 系统 | iStoreOS / OpenWrt x86_64（opkg + procd） | `cat /etc/openwrt_release` |
-| Python | 3.9 及以上（`python3-light`） | `python3 --version` |
-| 蓝牙 | 板载/外接蓝牙适配器（USB 蓝牙需 `kmod-btusb`） | `lsusb`、`hciconfig -a` |
+| 系统 | 使用 systemd 的 Linux 发行版（x86_64 / ARM 均可） | `systemctl --version` |
+| Python | 3.9 及以上（`python3`） | `python3 --version` |
+| 蓝牙 | 板载或 USB 蓝牙适配器，BlueZ 已启用 | `bluetoothctl show`、`rfkill list bluetooth` |
 | 音频 | BlueALSA + ALSA 工具（A2DP 接收侧桥接） | `pgrep bluealsa`、`aplay -L` |
-| 磁盘 | 约 5 MB 程序 + 声音库空间 | `df -h /overlay` |
+| 磁盘 | 约 5MB 程序 + 声音库空间 | `df -h /opt /etc` |
 | 权限 | root（安装、蓝牙控制、ALSA 放音） | `id -u` |
 
-> Python 依赖全部来自 OpenWrt 的 python3 标准库拆分包，**不需要 pip，不需要任何第三方库**。
+> Python 依赖全部来自系统 python3 标准库，**不需要 pip，不需要任何第三方 Python 包**。
 
 ## 2. 依赖包说明
 
-ipk 的 control **刻意不声明 `Depends`**：iStoreOS 的 iStore 本地安装沙箱无法解析 feeds 依赖，硬依赖会导致 `cannot find dependency` / `incompatible with the architectures configured` 安装失败。
+一键安装脚本会自动安装；也可手动按发行版安装。
 
-依赖分三处处理：
+### 2.1 各发行版命令
 
-1. **离线包 `install.sh`**：安装前统一 `opkg update && opkg install <下列包>`，失败会逐个安装并跳过固件源中不存在的包；
-2. **ipk 的 `postinst`**：安装后在真机上检查缺失依赖并尽力安装（失败不阻断安装）；
-3. **`/usr/share/btspeaker/scripts/install-deps.sh`**：以上都没装上时手动重试（幂等）：
-   ```sh
-   sh /usr/share/btspeaker/scripts/install-deps.sh          # 必需依赖
-   sh /usr/share/btspeaker/scripts/install-deps.sh --optional  # 附带 espeak / ffmpeg
-   ```
+| 发行版 | 必需依赖 | 可选增强 |
+| --- | --- | --- |
+| Debian / Ubuntu | `apt install python3 bluez bluez-alsa-utils alsa-utils mpg123` | `apt install espeak-ng ffmpeg` |
+| Fedora | `dnf install python3 bluez bluez-alsa alsa-utils mpg123` | `dnf install espeak-ng ffmpeg` |
+| Arch Linux | `pacman -S python bluez bluez-alsa alsa-utils mpg123` | `pacman -S espeak-ng ffmpeg` |
+| openSUSE | `zypper install python3 bluez bluez-alsa alsa-utils mpg123` | `zypper install espeak-ng ffmpeg` |
+
+> `bluez-alsa` 包名在发行版间不一致：Debian/Ubuntu 为 `bluez-alsa-utils`，Fedora/Arch/openSUSE 为
+> `bluez-alsa`，个别旧仓库叫 `bluealsa`。一键安装脚本会按顺序自动尝试。
+
+### 2.2 每个包的作用
 
 | 包名 | 作用 | 缺失影响 |
 | --- | --- | --- |
-| `python3-light` | Python 3 解释器与核心标准库 | 服务无法启动 |
-| `python3-urllib` | HTTP 客户端（TTS 请求、URL 音频下载、CLI） | TTS / URL 播放 / 命令行不可用 |
-| `python3-openssl` | HTTPS/TLS（HTTPS 的 TTS 接口） | HTTPS 资源不可用 |
-| `python3-email` | 标准库 email 解析（HTTP 头/编码处理） | 部分 TTS 响应解析异常 |
-| `python3-logging` | 日志模块 | 服务无法启动 |
-| `python3-uuid` | UUID（规则/任务 ID） | 服务无法启动 |
-| `bluez-daemon` | BlueZ 守护进程 `bluetoothd`、`bluetoothctl` | 无法扫描/配对/连接 |
-| `bluez-utils` | `hciconfig` / `btmon` 等调试工具 | 诊断受限（可选性较强） |
-| `bluealsa` | BlueALSA：把蓝牙 A2DP 音频桥接为 ALSA PCM（**OpenWrt 官方源无此包**，需固件内置或第三方源提供） | 无法通过蓝牙音箱放音（其余功能可用） |
+| `python3` | Python 3 解释器与标准库 | 服务无法启动 |
+| `bluez` | BlueZ 守护进程 `bluetoothd`、`bluetoothctl` | 无法扫描/配对/连接 |
+| `bluez-alsa`（`bluez-alsa-utils`） | BlueALSA：把蓝牙 A2DP 音频桥接为 ALSA PCM | 无法通过蓝牙音箱放音 |
 | `alsa-utils` | `aplay` 等 ALSA 工具 | 无法放音 / 无法检测 bluealsa PCM |
 | `mpg123` | MP3 解码播放（需带 alsa 输出模块） | mp3 无法播放；wav 仍可用 aplay |
-| `kmod-bluetooth` | 蓝牙核心内核模块（在 targets/core 源里） | 无蓝牙适配器 |
-| `kmod-btusb` | USB 蓝牙适配器驱动（**x86_64 内核已内建，官方源没有此包**，无需安装） | — |
+| `espeak-ng`（可选） | 离线 TTS 兜底（音质机械） | 无外网 TTS 服务时 TTS 不可用 |
+| `ffmpeg`（可选） | 非 mp3/wav 格式（ogg/flac 等）转码 | 这些格式无法播放 |
 
-可选增强（安装脚本只提示、不强制安装）：
-
-| 包名 | 作用 | 安装建议 |
-| --- | --- | --- |
-| `espeak` | 离线 TTS 兜底（音质机械） | 无外网 TTS 服务时安装：`opkg install espeak` |
-| `ffmpeg` | 非 mp3/wav 格式（ogg/flac 等）转码 | 需要播放其它格式时安装 |
-
-## 3. 方式一：iStore 上传 ipk 安装（推荐）
-
-### 3.1 构建 ipk
-
-在开发机（Windows / Linux / macOS，装有 Python 3.9+）的项目根目录执行：
+## 3. 方式一：一键安装（推荐）
 
 ```bash
-python scripts/build_ipk.py
+curl -fsSL https://raw.githubusercontent.com/wangmou1406/btspeaker/main/install.sh | sudo bash
 ```
 
-产物：
+脚本流程：
 
-- `dist/btspeaker_<版本>_all.ipk` —— opkg 安装包
-- `dist/btspeaker-<版本>-all.tar.gz` —— 离线安装包（解压后执行 `install.sh`）
+1. **检测环境**：root、发行版（`/etc/os-release`）、包管理器（apt / dnf / pacman / zypper）；
+2. **安装依赖**：python3、bluez、bluez-alsa（多包名自动尝试）、alsa-utils、mpg123；bluez-alsa 装不上不中断，会提示手动安装；
+3. **部署程序**：`/opt/btspeaker/btspeaker`（含 `web/` 与 `seed_rules.json`）、`/opt/btspeaker/scripts`、启动器 `/usr/local/bin/btspeaker`；
+4. **安装服务**：`/etc/systemd/system/btspeaker.service`；
+5. **初始化数据**：`/etc/btspeaker`（`config.json` + 5 条默认停用的示例规则，幂等，不覆盖已有配置）；
+6. **启动服务**：`systemctl daemon-reload` + `systemctl enable --now btspeaker`；
+7. **自检**：访问 `http://127.0.0.1:8722/api/health`，打印访问地址与后续步骤。
 
-构建脚本只用标准库，会自动扫描仓库中真实存在的文件；构建完成后会重新解析 ipk 自校验结构（外层 tar.gz 容器与 3 个成员、control 字段、data 文件清单、可执行权限），失败会以非 0 退出。
-> 注意：新版 OpenWrt / iStoreOS 的 opkg 要求 ipk 外层是 **tar.gz**（成员 `./debian-binary`、`./data.tar.gz`、`./control.tar.gz`）。旧式 ar 容器会被拒绝并报 `Malformed package file`，请务必用本仓库脚本构建，不要用老工具手工 ar 打包。
-
-### 3.2 上传安装（iStoreOS 图形界面）
-
-1. 浏览器登录 iStoreOS（LuCI）后台；
-2. 打开 **iStore 应用商店 → 手动安装 / 上传安装**（不同固件版本菜单名略有差异，也可能是 **系统 → 软件包 → 上传软件包**）；
-3. 选择 `dist/btspeaker_<版本>_all.ipk` 上传并安装；
-4. 安装完成后刷新页面，左侧或服务列表中出现「蓝音管家 BTSpeaker」，或直接访问 `http://<路由器IP>:8722/`。
-
-命令行等价操作：
+可选参数（通过 `bash -s --` 传给远程脚本）：
 
 ```bash
-scp dist/btspeaker_1.0.0_all.ipk root@192.168.1.1:/tmp/
-ssh root@192.168.1.1
-opkg update
-opkg install /tmp/btspeaker_1.0.0_all.ipk
+# 跳过系统依赖安装（离线/依赖已自备）
+curl -fsSL .../install.sh | sudo bash -s -- --no-deps
+
+# 额外安装 espeak-ng 与 ffmpeg
+curl -fsSL .../install.sh | sudo bash -s -- --optional
+
+# 只预览、不改动系统（可不加 sudo）
+curl -fsSL .../install.sh | bash -s -- --dry-run
+
+# 组合
+curl -fsSL .../install.sh | sudo bash -s -- --no-deps --optional
 ```
 
-查看安装结果：
+> 单行模式要求能访问 GitHub（下载源码包）；内网环境请用「方式二」，或设置
+> `BTSPEAKER_SRC_DIR=/path/to/source` 指向本地源码目录。
+
+## 4. 方式二：克隆仓库安装
 
 ```bash
-opkg list-installed | grep btspeaker
-ls -l /usr/bin/btspeaker /etc/init.d/btspeaker
+git clone https://github.com/wangmou1406/btspeaker.git
+cd btspeaker
+sudo bash install.sh                  # 安装 / 重复执行即升级覆盖
+sudo bash install.sh --dry-run        # 先预览计划
+sudo bash install.sh --no-deps        # 依赖已自备
+sudo bash install.sh --optional       # 额外安装 espeak-ng / ffmpeg
 ```
 
-ipk 的 `postinst` 会自动完成：创建 `/etc/btspeaker/{sounds,tmp}` 等目录 → `btspeaker seed --data-dir /etc/btspeaker`（写入默认 `config.json` 与 5 条默认停用的示例规则）→ uci 放行 TCP 8722（lan 区域）→ `/etc/init.d/btspeaker enable && start`。
+`--dry-run` 会在本地打印完整计划：检测到的源码目录、要创建的目录、要拷贝的文件、要初始化的数据目录、要执行的 systemd 命令；不会修改系统，也无需 root。
 
-## 4. 方式二：ssh 运行 install.sh（源码方式）
-
-适合没有 iStore 上传入口、或想直接跑源码的场景。
+## 5. 方式三：手动分步安装（不使用脚本）
 
 ```bash
-# 开发机：把整个项目目录传到路由器（任选其一）
-scp -r istoreos-btspeaker root@192.168.1.1:/tmp/
-# 或路由器上支持 git 时：git clone <仓库地址> /tmp/istoreos-btspeaker
-```
-
-```bash
-ssh root@192.168.1.1
-cd /tmp/istoreos-btspeaker
-sh install.sh --dry-run     # 建议先预览：只打印将执行的操作，不改动系统
-sh install.sh               # 正式安装；重复执行即升级覆盖
-```
-
-`install.sh` 选项：
-
-| 选项 | 说明 |
-| --- | --- |
-| `--dry-run` / `-n` | 只预览将执行的操作，不修改系统（非 root 下也可运行） |
-| `--no-deps` | 跳过 opkg 依赖安装（依赖已自备 / 离线环境） |
-| `--help` / `-h` | 显示帮助 |
-
-执行流程（全部幂等，可重复执行）：
-
-1. 检查 root 权限，检测 `/etc/openwrt_release`（不匹配只警告并继续）；
-2. `opkg update` + 安装依赖包（`--no-deps` 时跳过）；
-3. 创建 `/usr/lib/btspeaker`、`/usr/share/btspeaker/sounds`、`/etc/btspeaker/{sounds,tmp}`；
-4. 拷贝 `btspeaker/` 包（含 `web/`）到 `/usr/lib/btspeaker/btspeaker`，清理 `__pycache__`；
-5. 安装启动器 `/usr/bin/btspeaker`、procd 启动脚本 `/etc/init.d/btspeaker`、诊断脚本 `/usr/share/btspeaker/scripts/bt-diag.sh` 并 `chmod 0755`；
-6. 拷贝内置声音库（`assets/sounds/*.wav`）到 `/usr/share/btspeaker/sounds/`；
-7. `btspeaker seed --data-dir /etc/btspeaker` 初始化配置与示例规则（**已存在则不覆盖**）；
-8. uci 防火墙放行 TCP 8722（lan 区域）；
-9. `/etc/init.d/btspeaker enable && start`；
-10. 访问 `http://<LAN IP>:8722/api/health` 做一次健康检查，最后打印访问地址与后续步骤。
-
-## 5. 方式三：离线 tar.gz 安装包
-
-`dist/btspeaker-<版本>-all.tar.gz` 是自包含离线安装包（源码 + 安装脚本 + 声音库 + 文档）：
-
-```bash
-tar -xzf btspeaker-1.0.0-all.tar.gz
-cd btspeaker-1.0.0
-sh install.sh --no-deps        # 离线环境：依赖需事先自行准备好
-```
-
-## 6. 手动安装（不使用任何脚本）
-
-需要完全掌控每一步时，可以按下面流程手工安装：
-
-```bash
-# 1) 依赖
-opkg update
-opkg install python3-light python3-urllib python3-openssl python3-email \
-             python3-logging python3-uuid bluez-daemon bluez-utils bluealsa \
-             alsa-utils mpg123 kmod-bluetooth kmod-btusb
+# 1) 依赖（按发行版选一条）
+sudo apt install python3 bluez bluez-alsa-utils alsa-utils mpg123
+# sudo dnf install python3 bluez bluez-alsa alsa-utils mpg123
+# sudo pacman -S python bluez bluez-alsa alsa-utils mpg123
+# sudo zypper install python3 bluez bluez-alsa alsa-utils mpg123
 
 # 2) 目录
-mkdir -p /usr/lib/btspeaker /usr/share/btspeaker/{sounds,scripts} /etc/btspeaker/{sounds,tmp}
+sudo mkdir -p /opt/btspeaker /usr/share/btspeaker/sounds /etc/btspeaker/sounds /etc/btspeaker/tmp
 
-# 3) 程序文件（在项目根目录执行）
-cp -R btspeaker /usr/lib/btspeaker/
-cp scripts/btspeaker-launcher.sh /usr/bin/btspeaker
-cp scripts/init.d-btspeaker      /etc/init.d/btspeaker
-cp scripts/bt-diag.sh            /usr/share/btspeaker/scripts/bt-diag.sh
-cp assets/sounds/*.wav           /usr/share/btspeaker/sounds/ 2>/dev/null || true
-chmod 0755 /usr/bin/btspeaker /etc/init.d/btspeaker /usr/share/btspeaker/scripts/bt-diag.sh
+# 3) 程序文件（在仓库根目录执行）
+sudo cp -R btspeaker /opt/btspeaker/
+sudo cp -R scripts /opt/btspeaker/scripts
+sudo cp packaging/bin/btspeaker /usr/local/bin/btspeaker
+sudo chmod 0755 /usr/local/bin/btspeaker
+sudo cp packaging/systemd/btspeaker.service /etc/systemd/system/btspeaker.service
+sudo cp assets/sounds/*.wav /usr/share/btspeaker/sounds/
 
 # 4) 初始化配置与示例规则（幂等，已存在不覆盖）
-/usr/bin/btspeaker seed --data-dir /etc/btspeaker
+sudo PYTHONPATH=/opt/btspeaker python3 -m btspeaker seed --data-dir /etc/btspeaker
 
-# 5) 防火墙放行 TCP 8722（lan 区域）
-uci set firewall.btspeaker=rule
-uci set firewall.btspeaker.name='btspeaker'
-uci set firewall.btspeaker.src='lan'
-uci set firewall.btspeaker.dest_port='8722'
-uci set firewall.btspeaker.proto='tcp'
-uci set firewall.btspeaker.target='ACCEPT'
-uci commit firewall
-/etc/init.d/firewall reload
-
-# 6) 开机自启并启动
-/etc/init.d/btspeaker enable
-/etc/init.d/btspeaker start
+# 5) 注册并启动
+sudo systemctl daemon-reload
+sudo systemctl enable --now btspeaker
+sudo systemctl status btspeaker
 ```
 
-> 升级时只需替换 `/usr/lib/btspeaker/btspeaker` 与 `/usr/bin/btspeaker`、`/etc/init.d/btspeaker`，再 `restart`；`/etc/btspeaker` 不要删除。
+> 升级时替换 `/opt/btspeaker/btspeaker`、`/opt/btspeaker/scripts`、`/usr/local/bin/btspeaker` 与 unit 文件，
+> 再 `sudo systemctl daemon-reload && sudo systemctl restart btspeaker`；`/etc/btspeaker` 不要删除。
 
-## 7. 开机自启与服务管理
+## 6. systemd 管理
 
-服务由 OpenWrt procd 守护（init 脚本 `USE_PROCD=1`、`START=95`），崩溃自动拉起（`respawn 3600 5 0`）。
+服务单元关键配置（`/etc/systemd/system/btspeaker.service`）：
 
-```bash
-/etc/init.d/btspeaker enable     # 开机自启（创建 /etc/rc.d/S95btspeaker）
-/etc/init.d/btspeaker disable    # 取消开机自启
-/etc/init.d/btspeaker start
-/etc/init.d/btspeaker stop
-/etc/init.d/btspeaker restart
-/etc/init.d/btspeaker reload     # 配置变更后重启（config.json / rules.json 变化时 procd 也会自动重启）
-/etc/init.d/btspeaker status
+```ini
+[Unit]
+After=network-online.target bluetooth.target bluealsa.service
+Wants=network-online.target bluealsa.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/btspeaker serve --data-dir /etc/btspeaker
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
 ```
 
-检查自启是否生效：
+> `bluealsa.service` 在部分发行版可能不存在或叫 `bluez-alsa.service`；unit 使用 `Wants=`
+> 而非 `Requires=`，因此不会阻塞启动。
+
+常用命令：
 
 ```bash
-ls -l /etc/rc.d/ | grep btspeaker
+sudo systemctl daemon-reload              # 修改 unit 后重载
+sudo systemctl enable --now btspeaker     # 开机自启 + 启动
+sudo systemctl status btspeaker           # 状态
+sudo systemctl restart btspeaker          # 重启（改配置/升级后）
+sudo systemctl stop btspeaker             # 停止
+sudo systemctl disable btspeaker          # 取消开机自启
+journalctl -u btspeaker -f                # 实时日志
+journalctl -u btspeaker --since today     # 今天的日志
 ```
 
-## 8. 防火墙
-
-默认规则（postinst / install.sh 自动创建，脚本名 `btspeaker`）：
+检查开机自启是否生效：
 
 ```bash
-# 查看
-uci show firewall | grep -i btspeaker
+systemctl is-enabled btspeaker
+```
 
-# 手动添加（若自动创建失败）
-uci set firewall.btspeaker=rule
-uci set firewall.btspeaker.name='btspeaker'
-uci set firewall.btspeaker.src='lan'
-uci set firewall.btspeaker.dest_port='8722'
-uci set firewall.btspeaker.proto='tcp'
-uci set firewall.btspeaker.target='ACCEPT'
-uci commit firewall && /etc/init.d/firewall reload
+## 7. 防火墙
 
-# 删除
-uci delete firewall.btspeaker && uci commit firewall && /etc/init.d/firewall reload
+服务监听 TCP 8722。若开启防火墙，需要放行（**建议只放行局域网/可信网段**）。
+
+```bash
+# ufw（Debian/Ubuntu）
+sudo ufw allow from 192.168.1.0/24 to any port 8722 proto tcp
+sudo ufw status
+
+# firewalld（Fedora/openSUSE）
+sudo firewall-cmd --permanent --add-port=8722/tcp
+sudo firewall-cmd --reload
+# 或仅放行某个区域/网段：
+sudo firewall-cmd --permanent --zone=home --add-port=8722/tcp
+
+# nftables / iptables（示例：仅允许 192.168.1.0/24 访问）
+sudo nft add rule inet filter input ip saddr 192.168.1.0/24 tcp dport 8722 accept
+sudo iptables -A INPUT -p tcp -s 192.168.1.0/24 --dport 8722 -j ACCEPT
 ```
 
 说明：
 
-- 该规则只放行 `lan` 区域到路由器的 TCP 8722，符合「只在内网使用」的设计；
-- OpenWrt 默认 lan 区域 input 为 ACCEPT，部分固件其实不加规则也能访问，但显式放行更稳妥；
-- **不要把 8722 暴露到 WAN**。如确需远程访问，请使用 VPN / 反向代理 + TLS，并配置 `security.api_token`。
+- 本机 `127.0.0.1:8722` 不受防火墙影响，可用于排障；
+- **不要把 8722 暴露到公网**；远程访问请用 VPN 或反向代理 + TLS，并配置 `security.api_token`；
+- 如果修改了 `server.port`，记得同步修改防火墙规则与 systemd 无冲突（端口从配置读取，无需改 unit）。
 
-## 9. 验证安装
+## 8. 验证安装
 
-安装完成后按顺序执行：
+按顺序执行：
 
 ```bash
-# 1) 服务状态
-/etc/init.d/btspeaker status
-pgrep -f 'btspeaker serve'
+# 1) 服务与自启
+systemctl is-active btspeaker
+systemctl is-enabled btspeaker
 
 # 2) 端口监听
-netstat -lnt | grep 8722        # 或 ss -lnt | grep 8722
+ss -lntp | grep 8722          # 或 netstat -lntp | grep 8722
 
 # 3) HTTP 健康检查（无需 token）
-wget -qO- http://127.0.0.1:8722/api/health
+curl -s http://127.0.0.1:8722/api/health
 # 期望：{"ok": true, "data": {"status": "ok", "version": "1.0.0", ...}}
 
 # 4) 运行状态
-wget -qO- http://127.0.0.1:8722/api/status
+curl -s http://127.0.0.1:8722/api/status
 
 # 5) 服务内置自检（蓝牙/播放器/TTS）
 btspeaker diag
 
-# 6) 蓝牙链路诊断（逐项中文建议）
-sh /usr/share/btspeaker/scripts/bt-diag.sh
+# 6) 蓝牙链路诊断（systemd / bluealsa / ALSA 逐项中文建议）
+sudo sh /opt/btspeaker/scripts/bt-diag.sh
 
-# 7) 数据目录
+# 7) 数据目录与示例规则
 ls -l /etc/btspeaker
-# 期望：config.json、rules.json、btspeaker.log、sounds/、tmp/
-
-# 8) 示例规则（应为 5 条且全部停用）
-btspeaker rules list
+btspeaker rules list          # 应为 5 条且全部停用
 ```
 
-浏览器打开 `http://<路由器LAN IP>:8722/`，能看到「蓝音管家」总览页即安装成功。
+浏览器打开 `http://<主机IP>:8722/`，能看到「蓝音管家」总览页即安装成功。
 
-## 10. 升级
+## 9. 升级与回滚
 
-### ipk 升级
+### 升级
 
 ```bash
-# 备份数据目录（推荐，便于回滚）
-tar -czf /root/btspeaker-data-backup-$(date +%Y%m%d).tar.gz /etc/btspeaker
+# 1) 备份数据目录（推荐）
+sudo tar -czf ~/btspeaker-backup-$(date +%Y%m%d).tar.gz /etc/btspeaker
 
-opkg install /tmp/btspeaker_<新版本>_all.ipk
-/etc/init.d/btspeaker restart
+# 2) 重新执行安装（幂等，只覆盖程序，不动配置）
+curl -fsSL https://raw.githubusercontent.com/wangmou1406/btspeaker/main/install.sh | sudo bash
+
+# 或者仓库内：
+cd btspeaker && git pull && sudo bash install.sh
 ```
 
-- 数据目录 `/etc/btspeaker` 不在升级删除范围内；`btspeaker seed` 只在配置/规则缺失时写入，**升级不会覆盖用户配置与规则**；
-- 升级后如页面仍有旧缓存，浏览器强制刷新（Ctrl+F5）即可；
-- 服务在升级过程中会短暂重启（prerm 停止、postinst 启动）。
-
-### 源码方式升级
-
-```bash
-cd /tmp/istoreos-btspeaker   # 更新代码后
-sh install.sh                # 重复执行即覆盖程序文件，保留数据
-/etc/init.d/btspeaker restart
-```
+- 升级不会覆盖 `/etc/btspeaker`：`btspeaker seed` 仅在配置/规则缺失时写入；
+- 升级会自动 `daemon-reload` 并重启服务；页面如显示旧版本，强制刷新浏览器（Ctrl+F5）。
 
 ### 回滚
 
 ```bash
-# 方式一：重新安装旧版本 ipk（opkg 支持降级时需要 --force-downgrade）
-opkg install --force-downgrade /tmp/btspeaker_<旧版本>_all.ipk
-/etc/init.d/btspeaker restart
+# 1) 回退代码到上一个版本（仓库方式）
+cd btspeaker
+git log --oneline -5
+git checkout <上一个版本的 commit 或 tag>
+sudo bash install.sh
 
-# 方式二：恢复备份的配置（如果新版本改坏了配置）
-tar -xzf /root/btspeaker-data-backup-YYYYMMDD.tar.gz -C /
-/etc/init.d/btspeaker restart
+# 2) 恢复数据备份（如果新版本改坏了配置）
+sudo tar -xzf ~/btspeaker-backup-YYYYMMDD.tar.gz -C /
+sudo systemctl restart btspeaker
 ```
 
-## 11. 卸载
+## 10. 卸载
 
 ```bash
-# 源码方式：保留配置与数据
-sh uninstall.sh
-
-# 源码方式：彻底删除（含 /etc/btspeaker 配置、规则、日志、用户声音）
-sh uninstall.sh --purge
-
-# opkg 方式
-opkg remove btspeaker
-rm -rf /etc/btspeaker          # 可选：彻底清理数据
+# 仓库目录内执行
+sudo bash uninstall.sh            # 停止并删除程序，保留 /etc/btspeaker
+sudo bash uninstall.sh --purge    # 同时删除 /etc/btspeaker（配置、规则、日志、用户声音）
+sudo bash uninstall.sh --dry-run  # 先预览
 ```
 
-卸载会停止并禁用服务、删除 `/usr/lib/btspeaker`、`/usr/bin/btspeaker`、`/etc/init.d/btspeaker`、`/usr/share/btspeaker` 并移除防火墙 `btspeaker` 规则。默认保留 `/etc/btspeaker`，重新安装后可直接沿用。
+卸载会停止并禁用 systemd 服务、删除 unit 文件、`/opt/btspeaker`、`/usr/local/bin/btspeaker`、`/usr/share/btspeaker`；默认保留下 `/etc/btspeaker`，重新安装后可直接沿用。
 
-## 12. 安装常见问题
+## 11. 安装常见问题
 
 | 问题 | 原因与处理 |
 | --- | --- |
-| `opkg install` 报依赖缺失 | 先 `opkg update`；确认固件源里有 `bluealsa`、`python3-light` 等包；也可用 `sh install.sh --no-deps` 后手动补依赖 |
-| 提示 `python3: not found` | 未装 `python3-light`：`opkg install python3-light` |
-| 安装成功但打不开网页 | `/etc/init.d/btspeaker status` 与 `tail -n 100 /etc/btspeaker/btspeaker.log`；常见是端口被占用或 Python 依赖缺失 |
-| `uci set firewall...` 报错 | 当前固件防火墙配置不标准，可跳过脚本自行在 LuCI 防火墙页面放行 8722/tcp |
-| iStore 上传后找不到入口 | 蓝音管家是独立 Web 服务，不在 LuCI 菜单里；直接访问 `http://<路由器IP>:8722/` |
-| `opkg remove` 后配置还在 | 这是有意设计（默认保留 `/etc/btspeaker`）；彻底清理执行 `rm -rf /etc/btspeaker` |
-| 升级后规则/配置丢失 | 检查是否误删了 `/etc/btspeaker`；升级本身不会覆盖，可从备份恢复 |
+| `python3: command not found` | 手动安装依赖：Debian `apt install python3`；Fedora `dnf install python3` |
+| `bluez-alsa` 装不上 | 各发行版包名不同：Debian `bluez-alsa-utils`、Fedora/Arch/openSUSE `bluez-alsa`；装不上不影响服务启动，但播放会提示「未检测到 BlueALSA PCM」 |
+| 单行安装卡在下载 | 无法访问 GitHub；改用 `git clone` 后在仓库执行 `sudo bash install.sh`，或 `BTSPEAKER_SRC_DIR=<本地目录> sudo -E bash install.sh` |
+| `systemctl enable` 报 unit 不存在 | 先确认 `/etc/systemd/system/btspeaker.service` 已拷贝，再 `sudo systemctl daemon-reload` |
+| 服务启动即失败 | `journalctl -u btspeaker -n 80 --no-pager` 查看 Python 异常；常见是缺 python3 标准库模块或程序目录不完整 |
+| 安装成功但浏览器打不开 | 检查 `ss -lntp | grep 8722`、防火墙规则、是否访问的是 `http://` 而非 `https://` |
+| 升级后规则/配置丢失 | 检查是否误删 `/etc/btspeaker`；升级本身不会覆盖，可从备份恢复 |
+| 容器/WSL 没有 systemd | 服务无法注册为 systemd 服务；可手动前台运行：`sudo /usr/local/bin/btspeaker serve --data-dir /etc/btspeaker` |
 
-蓝牙、声音、TTS 相关的问题请见 [FAQ.md](FAQ.md)。
+蓝牙、声音、TTS 相关问题见 [FAQ.md](FAQ.md)。

@@ -1,0 +1,23 @@
+[Unit]
+Description=蓝音管家 BTSpeaker —— 蓝牙音箱连接与自动化播控服务
+Documentation=https://github.com/wangmou1406/btspeaker
+# 等网络、蓝牙栈与 BlueALSA 就绪后再启动；bluealsa.service 在个别发行版
+# 可能不存在或叫 bluez-alsa.service，用 Wants 而非 Requires，缺失时不阻塞启动。
+After=network-online.target bluetooth.target bluealsa.service
+Wants=network-online.target bluealsa.service
+
+[Service]
+Type=simple
+# 蓝牙控制（bluetoothctl）与 ALSA 放音需要 root 权限
+User=root
+ExecStart=/usr/local/bin/btspeaker serve --data-dir /etc/btspeaker
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONIOENCODING=utf-8
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=btspeaker
+
+[Install]
+WantedBy=multi-user.target
