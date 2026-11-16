@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import codecs
 import json
 import logging
 import os
@@ -364,3 +365,44 @@ def wait_or_stop(stop_event: threading.Event, seconds: float) -> bool:
         return bool(stop_event.wait(max(0.0, float(seconds))))
     except Exception:  # pragma: no cover
         return True
+
+
+# --------------------------------------------------------------------------- #
+# OpenWrt 精简 Python 兼容
+# --------------------------------------------------------------------------- #
+def _install_ascii_idna_fallback() -> None:
+    """为纯 ASCII 域名注册最小 idna codec。
+
+    OpenWrt 的 python3-light 没有 unicodedata，导致 ``encodings.idna`` 导入失败；
+    而 ``socket.getaddrinfo()`` 解析域名时需要 idna codec，HTTPS/HTTP 出站请求会直接抛
+    ``LookupError: unknown encoding: idna``。这里只处理 ASCII 域名（TTS/HTTP 场景足够），
+    域名含非 ASCII 字符时仍会明确报错。
+    """
+    try:
+        codecs.lookup("idna")
+        return
+    except Exception:  # pragma: no cover - 正常 Python 已有 idna
+        pass
+
+    def _encode(value, errors="strict"):
+        try:
+            return value.encode("ascii"), len(value)
+        except UnicodeEncodeError as exc:
+            if errors == "ignore":
+                return value.encode("ascii", "ignore"), len(value)
+            if errors == "replace":
+                return value.encode("ascii", "replace"), len(value)
+            raise UnicodeEncodeError("idna", value, exc.start, exc.end, "仅支持 ASCII 域名") from exc
+
+    def _decode(value, errors="strict"):
+        return value.decode("ascii", errors), len(value)
+
+    def _search(name):
+        if str(name).replace("-", "_").lower() != "idna":
+            return None
+        return codecs.CodecInfo(name="idna", encode=_encode, decode=_decode)
+
+    codecs.register(_search)
+
+
+_install_ascii_idna_fallback()
