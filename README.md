@@ -395,6 +395,13 @@ sudo bash uninstall.sh --dry-run  # 先预览
 
 项目早期面向 iStoreOS（OpenWrt 系）x86_64 软路由，使用 opkg / procd / ipk 打包。该路线**自 1.0.0 起不再维护**，相关代码归档在 [`packaging/openwrt/`](packaging/openwrt/)，仅供历史参考，**不推荐使用**。普通 Linux 用户请忽略该目录，使用根目录的 `install.sh` 与 systemd 单元。
 
+> **iStoreOS x86 用户特别注意**：iStoreOS 24.10 的 x86 内核配置为 `# CONFIG_BT is not set`，
+> **蓝牙子系统没有编译进内核**，因此在这类固件上无法使用蓝牙音箱（装 kmod、Docker 都无效）。
+> 如果一定要在 x86 软路由上做蓝牙放音，可改刷**官方 OpenWrt 24.10.x** 并按
+> [`docs/OPENWRT-FLASH.md`](docs/OPENWRT-FLASH.md) 操作：该流程包含刷机、官方源安装 Python/BlueZ、
+> 以及由 GitHub Actions 自动交叉编译的 `bluez-alsa` ipk（OpenWrt 官方源不含此包）。
+> 预编译产物会提交到 [`dist-openwrt/`](dist-openwrt/) 与 Release `openwrt-latest`。
+
 ## 安全说明
 
 - **面向局域网设计**：默认监听 `0.0.0.0:8722`，HTTP 明文传输，**不要直接暴露到公网**。如需远程访问，请使用 VPN，或反向代理 + TLS，并设置强 `api_token`。

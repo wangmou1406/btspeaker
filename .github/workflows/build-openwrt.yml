@@ -1,0 +1,131 @@
+name: Build OpenWrt packages (x86_64)
+
+# 用 OpenWrt SDK 交叉编译 bluez-alsa（官方 feed 不含此包），
+# 同时产出蓝音管家本体的 OpenWrt ipk（Architecture: all）。
+# 产物：Actions Artifact + GitHub Release + 提交到 dist-openwrt/（便于 raw.githubusercontent.com 下载）。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ["openwrt-*"]
+    paths:
+      - "packaging/openwrt/**"
+      - "btspeaker/**"
+      - "assets/**"
+      - ".github/workflows/build-openwrt.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: openwrt-build
+  cancel-in-progress: false
+
+env:
+  OPENWRT_VERSION: "24.10.4"
+  OPENWRT_TARGET: "x86/64"
+  SDK_FILE: "openwrt-sdk-24.10.4-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 安装宿主依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential zstd gawk wget git python3 libncurses-dev
+
+      - name: 下载并解压 OpenWrt SDK
+        run: |
+          SDK_ROOT="$GITHUB_WORKSPACE/openwrt-sdk"
+          mkdir -p "$SDK_ROOT"
+          curl -fL --retry 3 --connect-timeout 20 \
+            -o /tmp/sdk.tar.zst \
+            "https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${OPENWRT_TARGET}/${SDK_FILE}"
+          tar --zstd -xf /tmp/sdk.tar.zst -C "$SDK_ROOT" --strip-components=1
+          ls "$SDK_ROOT" | head -5
+
+      - name: 更新 OpenWrt feeds
+        working-directory: ${{ github.workspace }}/openwrt-sdk
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 编译 bluez-alsa（x86_64）
+        working-directory: ${{ github.workspace }}/openwrt-sdk
+        run: |
+          rm -rf package/bluez-alsa
+          cp -R "$GITHUB_WORKSPACE/packaging/openwrt/bluez-alsa" package/bluez-alsa
+          {
+            echo "CONFIG_TARGET_x86=y"
+            echo "CONFIG_TARGET_x86_64=y"
+            echo "CONFIG_PACKAGE_alsa-lib=y"
+            echo "CONFIG_PACKAGE_fdk-aac=y"
+            echo "CONFIG_PACKAGE_sbc=y"
+            echo "CONFIG_PACKAGE_libmpg123=y"
+            echo "CONFIG_PACKAGE_bluez-daemon=y"
+            echo "CONFIG_PACKAGE_bluez-libs=y"
+            echo "CONFIG_PACKAGE_bluez-alsa=y"
+            echo "CONFIG_PACKAGE_bluez-alsa-utils=y"
+          } > .config
+          make defconfig
+          make package/bluez-alsa/compile -j"$(nproc)" V=s
+          echo "--- bluez-alsa 编译产物 ---"
+          find bin/packages -name "bluez-alsa*.ipk" -printf "%p (%s bytes)\n"
+
+      - name: 打包蓝音管家 OpenWrt ipk
+        run: |
+          mkdir -p out
+          python3 packaging/openwrt/build_ipk.py --output-dir out
+
+      - name: 收集产物与校验和
+        run: |
+          mkdir -p artifacts
+          find "$GITHUB_WORKSPACE/openwrt-sdk/bin/packages" -name "bluez-alsa*.ipk" -exec cp {} artifacts/ \;
+          cp out/*.ipk artifacts/
+          cd artifacts
+          sha256sum *.ipk > SHA256SUMS
+          ls -l
+
+      - name: 上传 Actions Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-x86_64-ipk
+          path: artifacts/
+          retention-days: 30
+
+      - name: 提交预编译 ipk 到 dist-openwrt/
+        if: github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p dist-openwrt
+          cp artifacts/*.ipk dist-openwrt/
+          cp artifacts/SHA256SUMS dist-openwrt/
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add dist-openwrt
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(openwrt): 更新预编译 ipk（bluez-alsa + btspeaker）"
+            git push
+          else
+            echo "dist-openwrt 无变化"
+          fi
+
+      - name: 发布 GitHub Release
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: openwrt-latest
+          name: "OpenWrt x86_64 预编译包（bluez-alsa + BTSpeaker）"
+          body: |
+            由 GitHub Actions 自动构建（OpenWrt 24.10.4 SDK，x86_64）：
+            - bluez-alsa / bluez-alsa-utils：A2DP source/sink + AAC + mpg123 + ALSA 插件
+            - btspeaker：蓝音管家本体（Architecture: all）
+
+            安装说明见仓库 `docs/OPENWRT-FLASH.md`。
+          files: artifacts/*
+          make_latest: false
