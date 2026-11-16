@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
 from typing import Any, Dict, Optional
@@ -77,7 +78,8 @@ class AIClient:
         if "chat/completions" in url:
             return url
         url = url.rstrip("/")
-        if url.endswith("/v1"):
+        # 兼容各家版本路径：/v1（OpenAI/DeepSeek）与 /v4（智谱）等
+        if re.search(r"/v\d+$", url):
             return url + "/chat/completions"
         return url + "/v1/chat/completions"
 
@@ -168,8 +170,12 @@ class AIClient:
                 detail = exc.read(400).decode("utf-8", "replace").strip()[:160]
             except Exception:  # pragma: no cover - 读取错误体失败
                 detail = ""
+            hint = ""
+            if exc.code == 401:
+                hint = "（请检查 API Key 是否正确、是否过期；到服务商控制台重新复制完整 Key）"
             raise AIError(
-                "AI 接口返回错误：HTTP %s%s" % (exc.code, ("：" + detail) if detail else "")
+                "AI 接口返回错误：HTTP %s%s%s"
+                % (exc.code, ("：" + detail) if detail else "", hint)
             )
         except urllib.error.URLError as exc:
             reason = getattr(exc, "reason", exc)

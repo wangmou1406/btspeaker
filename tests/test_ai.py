@@ -70,6 +70,7 @@ class AIClientTest(unittest.TestCase):
             ("https://api.deepseek.com/v1/", "https://api.deepseek.com/v1/chat/completions"),
             ("https://api.openai.com/v1/chat/completions", "https://api.openai.com/v1/chat/completions"),
             ("http://127.0.0.1:8000", "http://127.0.0.1:8000/v1/chat/completions"),
+            ("https://open.bigmodel.cn/api/paas/v4", "https://open.bigmodel.cn/api/paas/v4/chat/completions"),
         ]
         for base, expected in cases:
             self.cfg.set("ai.base_url", base)
@@ -129,6 +130,7 @@ class AIClientTest(unittest.TestCase):
                 self.client.complete("你好")
         self.assertIn("401", str(ctx.exception))
         self.assertIn("invalid api key", str(ctx.exception))
+        self.assertIn("API Key", str(ctx.exception))
 
     def test_complete_empty_choices(self) -> None:
         self.configure()
