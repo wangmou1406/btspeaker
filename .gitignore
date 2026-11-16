@@ -14,6 +14,7 @@ dist/*
 !dist/.gitkeep
 build/
 *.ipk
+!dist-openwrt/*.ipk
 *.tar.gz
 
 # 编辑器

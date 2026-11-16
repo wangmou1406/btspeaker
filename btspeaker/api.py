@@ -16,6 +16,7 @@ import re
 import threading
 import time
 import urllib.parse
+import socketserver
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -1132,6 +1133,14 @@ class _ThreadingHTTPServer(ThreadingHTTPServer):
     def __init__(self, server_address, RequestHandlerClass, api: Api):  # noqa: N803
         self.api = api
         super().__init__(server_address, RequestHandlerClass)
+
+    def server_bind(self) -> None:  # noqa: D401
+        # 不用 HTTPServer.server_bind：它会调用 socket.getfqdn()，而 OpenWrt/iStoreOS 的
+        # 精简 Python（python3-light）默认不带 encodings.idna，会抛 LookupError 导致启动失败。
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = int(port)
 
 
 class ApiServer:

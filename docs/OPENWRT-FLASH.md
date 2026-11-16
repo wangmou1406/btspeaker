@@ -99,8 +99,8 @@ bluetoothctl list                 # 应列出 Controller
 ```sh
 cd /tmp
 BASE="https://raw.githubusercontent.com/wangmou1406/btspeaker/main/dist-openwrt"
-wget -O bluez-alsa.ipk        "$BASE/bluez-alsa_4.3.1-1_x86_64.ipk"
-wget -O bluez-alsa-utils.ipk  "$BASE/bluez-alsa-utils_4.3.1-1_x86_64.ipk"
+wget -O bluez-alsa.ipk        "$BASE/bluez-alsa_4.3.1-r1_x86_64.ipk"
+wget -O bluez-alsa-utils.ipk  "$BASE/bluez-alsa-utils_4.3.1-r1_x86_64.ipk"
 wget -O btspeaker.ipk         "$BASE/btspeaker_1.0.0_all.ipk"
 wget -O SHA256SUMS            "$BASE/SHA256SUMS"
 sha256sum -c SHA256SUMS 2>/dev/null || true
