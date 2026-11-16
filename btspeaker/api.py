@@ -476,6 +476,7 @@ class Api:
             "playing": playing,
             "current": current,
             "volume": clamp_int(self.cfg.get("player.volume", 70), 0, 100, 70),
+            "keep_alive": bool(getattr(self.app.player, "keep_alive_active", lambda: False)()),
             "probe": self._probe(),
         }
 

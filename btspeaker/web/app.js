@@ -2795,6 +2795,7 @@
             '<label class="field"><span>最长播放秒数</span><input id="set-player-max-duration" type="number" min="5" max="86400" value="' + escAttr(player.max_duration != null ? player.max_duration : 900) + '"></label>' +
             '<label class="field"><span>循环间隙（秒）</span><input id="set-player-loop-gap" type="number" min="0" max="60" value="' + escAttr(player.loop_gap != null ? player.loop_gap : 1) + '"></label>' +
             '<label class="field full"><span>硬件音量命令（可选）</span><input id="set-player-volume-command" type="text" value="' + escAttr(player.volume_command || '') + '" placeholder="留空表示不调用"></label>' +
+            '<label class="check-row full"><input id="set-player-keepalive" type="checkbox"' + (player.keep_alive ? ' checked' : '') + '><span>静音保活（空闲时保持音频流，防止蓝牙音箱自动关机）</span></label>' +
             (playerProbe && playerProbe.hint ? '<p class="hint hint-warn">' + icon('i-alert') + esc(playerProbe.hint) + '</p>' : '') +
             '<button class="btn" type="submit">' + icon('i-check') + '保存播放器设置</button>' +
             '</div></form>'
@@ -2913,6 +2914,7 @@
       patch.max_duration = clampInt(num('set-player-max-duration', 900), 5, 86400);
       patch.loop_gap = clampInt(num('set-player-loop-gap', 1), 0, 60);
       patch.volume_command = trim('set-player-volume-command');
+      patch.keep_alive = bool('set-player-keepalive');
       return Object.assign({}, current, patch);
     }
     if (section === 'bluetooth') {

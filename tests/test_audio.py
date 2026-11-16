@@ -270,6 +270,23 @@ class ProbeTest(_PlayerCase):
         self.assertEqual("dev=AA:BB:CC:11:22:33,foo={foo}", player2._render_alsa_device(MAC))
         self.assertEqual("dev=,foo={foo}", player2._render_alsa_device(""))
 
+    def test_keep_alive_defaults_and_toggle(self) -> None:
+        cfg, player, _bus, _rec = self.make_mock()
+        self.assertFalse(player.keep_alive_enabled())
+        self.assertFalse(player.keep_alive_active())
+        cfg.set("player.keep_alive", True)
+        self.assertTrue(player.keep_alive_enabled())
+        cfg.set("player.keep_alive", "yes")
+        self.assertTrue(player.keep_alive_enabled())
+        cfg.set("player.keep_alive", "0")
+        self.assertFalse(player.keep_alive_enabled())
+
+    def test_keep_alive_skipped_in_mock_mode(self) -> None:
+        cfg, player, _bus, _rec = self.make_mock()
+        cfg.set("player.keep_alive", True)
+        # 模拟模式不应启动真实音频流
+        self.assertFalse(player._keepalive_should_run())
+
     def test_mpg123_argv(self) -> None:
         _cfg, player, _bus, _rec = self.make_mock()
         argv100 = player._mpg123_argv("/tmp/a.mp3", "pcm0", 100)

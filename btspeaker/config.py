@@ -55,6 +55,8 @@ DEFAULT_CONFIG = {
         "max_duration": 900,
         "loop_gap": 1,
         "volume_command": "",
+        # 静音保活：空闲时持续发送静音 A2DP 流，避免音箱长时间无音频自动关机
+        "keep_alive": False,
     },
     "tts": {
         "backend": "auto",  # auto | http | espeak | mock

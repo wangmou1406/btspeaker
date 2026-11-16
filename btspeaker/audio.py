@@ -97,6 +97,17 @@ class Player:
         # 兜底地址来源：服务启动时设备已经连着、没收到 connected 事件时使用
         self._address_provider: Optional[Callable[[], str]] = None
         self._bus_tokens: List[str] = []
+        # 静音保活：空闲时向 bluealsa 持续写入静音 PCM，保持 A2DP 流不断，
+        # 避免部分蓝牙音箱因长时间无音频而自动关机；播放时自动暂停。
+        self._keepalive_closed = threading.Event()
+        self._keepalive_lock = threading.Lock()
+        self._keepalive_proc: Optional[Any] = None
+        self._keepalive_active = False
+        self._keepalive_suspended = False
+        self._keepalive_thread = threading.Thread(
+            target=self._keepalive_loop, name="player-keepalive", daemon=True
+        )
+        self._keepalive_thread.start()
         if bus is not None:
             try:
                 self._bus_tokens.append(
@@ -110,6 +121,12 @@ class Player:
 
     def close(self) -> None:
         """释放事件订阅（服务退出时调用）。"""
+        self._keepalive_closed.set()
+        self._stop_keepalive_proc()
+        try:
+            self._keepalive_thread.join(timeout=2.0)
+        except Exception:  # pragma: no cover - 防御性
+            pass
         if self.bus is not None:
             for token in list(self._bus_tokens):
                 try:
@@ -140,6 +157,107 @@ class Player:
     def set_address_provider(self, provider: Optional[Callable[[], str]]) -> None:
         """注册当前已连接设备地址的查询回调，避免错过连接事件时无法播放。"""
         self._address_provider = provider
+
+    # -- 静音保活 ------------------------------------------------------ #
+    def keep_alive_enabled(self) -> bool:
+        """配置是否开启静音保活（兼容字符串/布尔值）。"""
+        value = self.cfg.get("player.keep_alive", False)
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+    def keep_alive_active(self) -> bool:
+        """当前是否正在发送保活静音流。"""
+        with self._keepalive_lock:
+            return bool(self._keepalive_active)
+
+    def _keepalive_should_run(self) -> bool:
+        if self._keepalive_closed.is_set() or self._keepalive_suspended:
+            return False
+        if not self.keep_alive_enabled() or self._is_mock():
+            return False
+        if self.is_playing():
+            return False
+        if not self._tool_path("aplay"):
+            return False
+        return bool(self._pick_address(None))
+
+    def _keepalive_loop(self) -> None:
+        while not self._keepalive_closed.is_set():
+            try:
+                if not self._keepalive_should_run():
+                    self._stop_keepalive_proc()
+                    self._keepalive_closed.wait(5.0)
+                    continue
+                self._keepalive_stream()
+            except Exception:  # pragma: no cover - 防御性
+                self.logger.warning("静音保活异常，5 秒后重试", exc_info=True)
+                self._stop_keepalive_proc()
+                self._keepalive_closed.wait(5.0)
+
+    def _keepalive_stream(self) -> None:
+        address = self._pick_address(None)
+        if not address:
+            return
+        pcm = self._render_alsa_device(address)
+        aplay = self._tool_path("aplay")
+        if not aplay:
+            return
+        proc = subprocess.Popen(
+            [aplay, "-q", "-D", pcm, "-t", "raw", "-f", "cd"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        with self._keepalive_lock:
+            self._keepalive_proc = proc
+            self._keepalive_active = True
+        self.logger.info("静音保活已开启（设备 %s）", address)
+        chunk = b"\x00" * 17640  # 0.1 秒 CD 级静音（44100Hz 立体声 16bit）
+        tick = 0
+        try:
+            while not self._keepalive_closed.is_set():
+                if self._keepalive_suspended or self.is_playing() or not self.keep_alive_enabled():
+                    break
+                tick += 1
+                if tick % 20 == 0 and not self._pick_address(None):
+                    break
+                started = time.monotonic()
+                proc.stdin.write(chunk)
+                proc.stdin.flush()
+                elapsed = time.monotonic() - started
+                if elapsed < 0.1:
+                    self._keepalive_closed.wait(max(0.0, 0.1 - elapsed))
+        except (BrokenPipeError, OSError, ValueError):
+            pass
+        finally:
+            self._stop_keepalive_proc(proc)
+            self.logger.info("静音保活已停止")
+
+    def _stop_keepalive_proc(self, proc: Optional[Any] = None) -> None:
+        with self._keepalive_lock:
+            current = proc if proc is not None else self._keepalive_proc
+            if self._keepalive_proc is current:
+                self._keepalive_proc = None
+            self._keepalive_active = False
+        if current is None:
+            return
+        try:
+            if current.stdin is not None:
+                current.stdin.close()
+        except Exception:  # pragma: no cover - 防御性
+            pass
+        try:
+            current.terminate()
+        except Exception:  # pragma: no cover - 防御性
+            pass
+        try:
+            current.wait(timeout=2.0)
+        except Exception:  # pragma: no cover - 防御性
+            try:
+                current.kill()
+            except Exception:  # pragma: no cover - 防御性
+                pass
 
     # -- 工具探测 ------------------------------------------------------ #
     def _is_mock(self) -> bool:
@@ -245,7 +363,9 @@ class Player:
         return {"tool": "audio", "ok": bool(probe.get("ready")), "detail": detail,
                 "backend": probe.get("backend"), "tools": probe.get("tools"),
                 "bluealsa_pcm": probe.get("bluealsa_pcm"), "hint": hint,
-                "volume": self.get_volume(), "playing": self.is_playing()}
+                "volume": self.get_volume(), "playing": self.is_playing(),
+                "keep_alive": self.keep_alive_active(),
+                "keep_alive_enabled": self.keep_alive_enabled()}
 
     # -- 播放源解析 ---------------------------------------------------- #
     def resolve_source(self, source: str) -> str:
@@ -394,6 +514,9 @@ class Player:
         pcm = self._render_alsa_device(address)
         started = time.time()
         with self._play_lock:
+            # 保活流会让出 bluealsa PCM，播放真实音频前先停掉
+            self._keepalive_suspended = True
+            self._stop_keepalive_proc()
             self._stop_event.clear()
             if backend != "mock":
                 self._apply_volume_command(volume, address)
@@ -428,6 +551,7 @@ class Player:
                         break
             finally:
                 self._finish_state()
+                self._keepalive_suspended = False
         duration = round(max(0.0, time.time() - started), 2)
         if skipped:
             self._publish(EV_PLAYER_STOPPED, {"source": req.source, "reason": "用户停止"})
