@@ -409,9 +409,11 @@
   }
 
   function pollStatus() {
-    if (pollBusy) return;
+    // 返回 Promise：afterDeviceChange() 等调用方会 .then() 链式等待状态刷新，
+    // 早期版本这里没有返回值，会导致前端报 "Cannot read properties of undefined (reading 'then')"。
+    if (pollBusy) return Promise.resolve(S.status);
     pollBusy = true;
-    api('/api/status', { timeout: 9000 }).then(function (st) {
+    return api('/api/status', { timeout: 9000 }).then(function (st) {
       if (!st) throw new ApiError('状态接口返回为空', 'bad_response', 0);
       S.status = st;
       markOnline(true);
@@ -651,7 +653,7 @@
     var btn = target;
     if (btn && btn.tagName === 'FORM') btn = btn.querySelector('[type="submit"]');
     if (!btn) return fn();
-    if (btn.dataset && btn.dataset.busy === '1') return undefined;
+    if (btn.dataset && btn.dataset.busy === '1') return Promise.resolve();
     if (btn.dataset) btn.dataset.busy = '1';
     btn.classList.add('is-busy');
     btn.setAttribute('aria-busy', 'true');

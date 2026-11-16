@@ -151,15 +151,44 @@ class Player:
     def _tool_argv(self, name: str) -> str:
         return self._tool_path(name) or str(self.cfg.get("player.%s" % name, name) or name)
 
+    # bluealsa 的 ALSA 插件/配置常见安装位置（Debian/Ubuntu 与 OpenWrt 不同）
+    _BLUEALSA_CONF_CANDIDATES = (
+        "/etc/alsa/conf.d/20-bluealsa.conf",
+        "/usr/lib/alsa-lib/libasound_module_pcm_bluealsa.so",
+        "/usr/lib/x86_64-linux-gnu/alsa-lib/libasound_module_pcm_bluealsa.so",
+        "/usr/lib/aarch64-linux-gnu/alsa-lib/libasound_module_pcm_bluealsa.so",
+    )
+
+    def _bluealsa_conf_path(self) -> str:
+        for path in self._BLUEALSA_CONF_CANDIDATES:
+            if os.path.isfile(path):
+                return path
+        return ""
+
     def _detect_bluealsa_pcm(self) -> bool:
+        """检测 BlueALSA 是否可用。
+
+        注意：OpenWrt 精简版 aplay -L 不一定列出 bluealsa 的 hint（实测只列 null），
+        但插件与配置其实已经装好、PCM 也能打开。因此 aplay -L 只是第一判据，
+        再兜底检查 bluealsa 守护进程与 ALSA 插件/配置文件。
+        """
         aplay = self._tool_path("aplay")
-        if not aplay:
-            return False
+        if aplay:
+            try:
+                result = run_cmd([aplay, "-L"], timeout=5.0)
+                text = ((result.stdout or "") + "\n" + (result.stderr or "")).lower()
+                if "bluealsa" in text:
+                    return True
+            except Exception:  # pragma: no cover
+                pass
         try:
-            result = run_cmd([aplay, "-L"], timeout=5.0)
+            result = run_cmd(["pidof", "bluealsa"], timeout=3.0)
+            # pidof 正常输出是 PID 列表，必须包含数字才算真正在运行
+            if any(ch.isdigit() for ch in (result.stdout or "")):
+                return True
         except Exception:  # pragma: no cover
-            return False
-        return "bluealsa" in ((result.stdout or "") + "\n" + (result.stderr or "")).lower()
+            pass
+        return bool(self._bluealsa_conf_path())
 
     def probe(self) -> Dict[str, Any]:
         """检测播放后端是否就绪，返回工具状态与中文提示。"""
@@ -177,10 +206,13 @@ class Player:
         if not tools["aplay"]:
             hints.append(_INSTALL_HINTS["aplay"])
         if not bluealsa_pcm:
-            hints.append(
-                "未检测到 bluealsa 音频设备：opkg install bluealsa，"
-                "并在 /etc/asound.conf 配置 bluealsa 插件"
-            )
+            if self._bluealsa_conf_path():
+                hints.append("bluealsa 已安装但进程未运行：/etc/init.d/bluealsa start")
+            else:
+                hints.append(
+                    "未检测到 bluealsa 音频设备：opkg install bluealsa，"
+                    "并在 /etc/asound.conf 配置 bluealsa 插件"
+                )
         if not tools["mpg123"]:
             hints.append(_INSTALL_HINTS["mpg123"])
         if not ready and not hints:  # pragma: no cover - 理论上不会走到
