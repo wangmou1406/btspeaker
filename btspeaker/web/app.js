@@ -18,6 +18,7 @@
   var ACTION_TYPES = [
     { value: 'play', label: '播放声音' },
     { value: 'tts', label: '语音播报' },
+    { value: 'ai', label: 'AI 播报' },
     { value: 'volume', label: '设置音量' },
     { value: 'connect', label: '连接音箱' },
     { value: 'disconnect', label: '断开音箱' },
@@ -31,7 +32,7 @@
     { value: 'time_between', label: '时间段' },
     { value: 'weekday_in', label: '星期范围' }
   ];
-  var SECTION_LABELS = { tts: 'TTS 设置', player: '播放器设置', bluetooth: '蓝牙设置', security: '安全设置' };
+  var SECTION_LABELS = { tts: 'TTS 设置', ai: 'AI 设置', player: '播放器设置', bluetooth: '蓝牙设置', security: '安全设置' };
   var TRIGGER_TYPES = [
     { value: 'schedule', label: '定时' },
     { value: 'bluetooth', label: '蓝牙事件' },
@@ -2090,6 +2091,15 @@
         '<label class="field"><span>语音（可选，留空用全局配置）</span><input type="text" ' + attr('voice') + ' value="' + value(a.voice) + '" placeholder="zh"></label>' +
         '<label class="field"><span>音量 0-100（可选）</span><input type="number" min="0" max="100" ' + attr('volume') + ' value="' + value(a.volume) + '"></label>';
     }
+    if (type === 'ai') {
+      return '<label class="field full"><span>提示词 PROMPT（支持模板变量，如 {time} {date} {weekday}）</span>' +
+        '<textarea rows="3" ' + attr('prompt') + ' placeholder="用一句简短的中文播报：今天是 {date}，{weekday}，{time}。">' + esc(a.prompt || '') + '</textarea></label>' +
+        '<label class="field full"><span>系统提示词（可选，留空用全局 AI 设置）</span>' +
+        '<textarea rows="2" ' + attr('system') + ' placeholder="你是蓝音管家，用简洁口语播报">' + esc(a.system || '') + '</textarea></label>' +
+        '<label class="field"><span>模型（可选）</span><input type="text" ' + attr('model') + ' value="' + value(a.model) + '" placeholder="留空用全局配置"></label>' +
+        '<label class="field"><span>音量 0-100（可选）</span><input type="number" min="0" max="100" ' + attr('volume') + ' value="' + value(a.volume != null ? a.volume : '') + '"></label>' +
+        '<p class="hint">' + icon('i-info') + '需要先在「设置 → AI 播报」里配置接口地址、API Key 并启用。</p>';
+    }
     if (type === 'volume') {
       return '<label class="field"><span>目标音量 0-100</span><input type="number" min="0" max="100" ' + attr('level') + ' value="' + value(a.level != null ? a.level : 60) + '"></label>';
     }
@@ -2364,6 +2374,19 @@
         tts.volume = ttsVolume;
       }
       return { value: tts };
+    }
+    if (type === 'ai') {
+      var aiPrompt = text('prompt');
+      if (!aiPrompt) return { error: 'AI 播报缺少提示词' };
+      var aiAction = { type: 'ai', prompt: aiPrompt };
+      if (text('system')) aiAction.system = text('system');
+      if (text('model')) aiAction.model = text('model');
+      var aiVolume = number('volume');
+      if (aiVolume !== null) {
+        if (isNaN(aiVolume) || aiVolume < 0 || aiVolume > 100) return { error: 'AI 播报音量需要在 0-100 之间' };
+        aiAction.volume = aiVolume;
+      }
+      return { value: aiAction };
     }
     if (type === 'volume') {
       var level = number('level');
@@ -2669,10 +2692,12 @@
     var st = S.status || {};
     var cfg = config || null;
     var tts = (cfg && cfg.tts) || {};
+    var ai = (cfg && cfg.ai) || {};
     var player = (cfg && cfg.player) || {};
     var bluetooth = (cfg && cfg.bluetooth) || {};
     var security = (cfg && cfg.security) || {};
     var ttsStatus = st.tts || {};
+    var aiProbe = st.ai || {};
     var playerProbe = (st.player && st.player.probe) || {};
     var sim = !!(st.sim || (S.system && S.system.sim));
     var headers = tts.headers && Object.keys(tts.headers).length ? JSON.stringify(tts.headers, null, 2) : '';
@@ -2732,6 +2757,28 @@
             '<div class="inline-test"><input id="set-tts-test-text" type="text" placeholder="输入测试文本，例如：测试播报" aria-label="测试播报文本">' +
             '<button class="btn" type="button" data-act="tts-test">' + icon('i-play') + '测试播报</button>' +
             '<button class="btn" type="submit">' + icon('i-check') + '保存 TTS 设置</button></div>' +
+            '</form>'
+        }) +
+        /* AI 播报 */
+        cardHTML({
+          iconName: 'i-zap', title: 'AI 播报',
+          right: aiProbe.ready ? pill('AI 已就绪', 'ok') : pill('未配置', 'warn'),
+          body: '<form data-settings-section="ai" novalidate><div class="form-grid">' +
+            '<label class="check-row full"><input id="set-ai-enabled" type="checkbox"' + (ai.enabled ? ' checked' : '') + '><span>启用 AI 播报（规则动作与测试都需要开启）</span></label>' +
+            '<label class="field full"><span>接口地址（OpenAI 兼容，填到 /v1 即可）</span>' +
+            '<input id="set-ai-base-url" type="text" class="mono" value="' + escAttr(ai.base_url || '') + '" placeholder="https://api.deepseek.com/v1"></label>' +
+            '<label class="field"><span>API Key</span><input id="set-ai-api-key" type="password" autocomplete="new-password" value="" placeholder="' + escAttr(ai.api_key ? '已设置（留空表示不修改）' : 'sk-...') + '"></label>' +
+            '<label class="field"><span>模型</span><input id="set-ai-model" type="text" value="' + escAttr(ai.model || 'deepseek-chat') + '" placeholder="deepseek-chat"></label>' +
+            '<label class="field full"><span>系统提示词（决定回答风格，适合朗读）</span><textarea id="set-ai-system" rows="3">' + esc(ai.system_prompt || '') + '</textarea></label>' +
+            '<label class="field"><span>超时（秒）</span><input id="set-ai-timeout" type="number" min="3" max="300" value="' + escAttr(ai.timeout != null ? ai.timeout : 30) + '"></label>' +
+            '<label class="field"><span>最大 tokens</span><input id="set-ai-max-tokens" type="number" min="32" max="4096" value="' + escAttr(ai.max_tokens != null ? ai.max_tokens : 300) + '"></label>' +
+            '<label class="field"><span>温度 0-2</span><input id="set-ai-temperature" type="number" min="0" max="2" step="0.1" value="' + escAttr(ai.temperature != null ? ai.temperature : 0.7) + '"></label>' +
+            '<button class="btn" type="submit">' + icon('i-check') + '保存 AI 设置</button>' +
+            '</div>' +
+            '<div class="inline-test"><input id="set-ai-test-prompt" type="text" placeholder="输入测试提示词，例如：用一句话介绍你自己" aria-label="AI 测试提示词">' +
+            '<button class="btn" type="button" data-act="ai-test">' + icon('i-zap') + '生成并播报</button></div>' +
+            '<p class="hint" id="set-ai-test-output"></p>' +
+            (aiProbe.hint ? '<p class="hint hint-warn">' + icon('i-alert') + esc(aiProbe.hint) + '</p>' : '') +
             '</form>'
         }) +
         /* 播放器 */
@@ -2846,6 +2893,19 @@
       }
       return Object.assign({}, current, patch);
     }
+    if (section === 'ai') {
+      patch.enabled = bool('set-ai-enabled');
+      patch.base_url = trim('set-ai-base-url');
+      patch.model = trim('set-ai-model') || 'deepseek-chat';
+      patch.system_prompt = raw('set-ai-system');
+      patch.timeout = clampInt(num('set-ai-timeout', 30), 3, 300);
+      patch.max_tokens = clampInt(num('set-ai-max-tokens', 300), 32, 4096);
+      var aiTemp = parseFloat(trim('set-ai-temperature'));
+      patch.temperature = Number.isFinite(aiTemp) ? Math.max(0, Math.min(2, aiTemp)) : 0.7;
+      var aiKey = trim('set-ai-api-key');
+      if (aiKey) patch.api_key = aiKey;
+      return Object.assign({}, current, patch);
+    }
     if (section === 'player') {
       patch.backend = trim('set-player-backend') || 'auto';
       patch.volume = clampInt(num('set-player-volume', 70), 0, 100);
@@ -2930,6 +2990,28 @@
           input.value = '';
           input.classList.remove('is-invalid');
         }
+      }).catch(function (err) {
+        toast(err.message, 'danger');
+      });
+    });
+  }
+
+  function aiTest(btn) {
+    var input = document.getElementById('set-ai-test-prompt');
+    var prompt = input ? input.value.trim() : '';
+    if (!prompt) {
+      if (input) { input.classList.add('is-invalid'); input.focus(); }
+      toast('请输入测试提示词', 'warn');
+      return;
+    }
+    return busy(btn, function () {
+      return api('/api/ai/chat', { method: 'POST', body: { prompt: prompt, speak: true }, timeout: 120000 }).then(function (data) {
+        var text = (data && data.text) || '';
+        var out = document.getElementById('set-ai-test-output');
+        if (out) out.textContent = text ? 'AI 生成：' + text : '';
+        if (data && data.spoken) toast('AI 已生成并播报：' + text.slice(0, 40));
+        else if (data && data.tts_error) toast('AI 已生成，但播报失败：' + data.tts_error, 'warn');
+        else toast('AI 已生成：' + text.slice(0, 40));
       }).catch(function (err) {
         toast(err.message, 'danger');
       });
@@ -3103,6 +3185,7 @@
     'move-action-up': function (btn) { moveAction(btn, -1); },
     'move-action-down': function (btn) { moveAction(btn, 1); },
     'tts-test': function (btn) { return ttsTest(btn); },
+    'ai-test': function (btn) { return aiTest(btn); },
     'reload-system': function (btn) { return reloadSystemInfo(btn); },
     'reload-diag': function (btn) { return reloadDiag(btn); }
   };

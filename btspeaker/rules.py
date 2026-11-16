@@ -31,7 +31,7 @@ from .util import (
 
 TRIGGER_TYPES = ("schedule", "bluetooth", "boot", "manual")
 CONDITION_TYPES = ("connected", "time_between", "weekday_in")
-ACTION_TYPES = ("play", "tts", "volume", "connect", "disconnect", "command", "http", "wait", "log")
+ACTION_TYPES = ("play", "tts", "ai", "volume", "connect", "disconnect", "command", "http", "wait", "log")
 BLUETOOTH_EVENTS = ("connected", "disconnected", "paired")
 
 RULES_VERSION = 1
@@ -196,6 +196,12 @@ def _normalize_action(raw: Dict[str, Any]) -> Dict[str, Any]:
     elif atype == "tts":
         action["text"] = _as_text(action.get("text"))
         action["voice"] = _as_text(action.get("voice"))
+        if action.get("volume") is not None:
+            action["volume"] = _as_int(action.get("volume"))
+    elif atype == "ai":
+        action["prompt"] = _as_text(action.get("prompt"))
+        action["system"] = _as_text(action.get("system"))
+        action["model"] = _as_text(action.get("model"))
         if action.get("volume") is not None:
             action["volume"] = _as_int(action.get("volume"))
     elif atype == "volume":
@@ -418,6 +424,14 @@ def _validate_action(action: Any, index: int) -> List[str]:
         if action.get("voice") is not None and not isinstance(action.get("voice"), str):
             errors.append("%s（tts）的 voice 必须是字符串" % prefix)
         errors.extend(_validate_volume(action.get("volume"), "%s（tts）" % prefix))
+    elif atype == "ai":
+        if not _as_text(action.get("prompt")):
+            errors.append("%s（ai）缺少 prompt（要交给 AI 生成播报内容的提示词）" % prefix)
+        if action.get("system") is not None and not isinstance(action.get("system"), str):
+            errors.append("%s（ai）的 system 必须是字符串" % prefix)
+        if action.get("model") is not None and not isinstance(action.get("model"), str):
+            errors.append("%s（ai）的 model 必须是字符串" % prefix)
+        errors.extend(_validate_volume(action.get("volume"), "%s（ai）" % prefix))
     elif atype == "volume":
         level = action.get("level")
         if level is None:

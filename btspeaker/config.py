@@ -68,6 +68,16 @@ DEFAULT_CONFIG = {
         "timeout": 20,
         "format": "mp3",
     },
+    "ai": {
+        "enabled": False,
+        "base_url": "",
+        "api_key": "",
+        "model": "deepseek-chat",
+        "system_prompt": "你是蓝音管家，用简洁自然的中文回答，适合语音朗读；不要使用 Markdown、列表符号或表情。",
+        "timeout": 30,
+        "max_tokens": 300,
+        "temperature": 0.7,
+    },
     "rules": {
         "enabled": True,
         "max_concurrent": 1,
@@ -226,6 +236,9 @@ class Config:
         token = deep_get(data, "security.api_token", "")
         if token:
             deep_set(data, "security.api_token", "******")
+        ai_key = deep_get(data, "ai.api_key", "")
+        if ai_key:
+            deep_set(data, "ai.api_key", "******")
         return data
 
     # ------------------------------------------------------------------ #

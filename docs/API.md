@@ -784,6 +784,15 @@ curl -s -X POST "$BASE/api/rules/import" \
 
 `source` 表示来源（如 `system` / `user`）；`path` 可直接作为播放接口的 `source`。
 
+### AI 播报
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/ai` | 返回 AI 配置探测结果（不含 API Key）：`{ready, backend, model, base_url, hint}` |
+| POST | `/api/ai/chat` | 生成文本：`{"prompt": "…", "system": "…", "speak": true}`，返回 `{text, spoken, tts_error}`；`speak=true` 时直接 TTS 播报 |
+
+设置项位于 `PUT /api/settings` 的 `ai` 段：`enabled`、`base_url`、`api_key`、`model`、`system_prompt`、`timeout`、`max_tokens`、`temperature`。
+
 ### 11.2 `POST /api/library/upload`
 
 把本地音频文件保存到声音库。请求体是**原始音频字节**（`Content-Type: <file.type>`，**不是 multipart/form-data**），文件名通过查询参数传入。

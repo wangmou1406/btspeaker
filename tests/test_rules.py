@@ -51,7 +51,7 @@ class NormalizeTest(unittest.TestCase):
         self.assertEqual(TRIGGER_TYPES, ("schedule", "bluetooth", "boot", "manual"))
         self.assertEqual(
             ACTION_TYPES,
-            ("play", "tts", "volume", "connect", "disconnect", "command", "http", "wait", "log"),
+            ("play", "tts", "ai", "volume", "connect", "disconnect", "command", "http", "wait", "log"),
         )
         self.assertEqual(CONDITION_TYPES, ("connected", "time_between", "weekday_in"))
 
@@ -141,6 +141,7 @@ class ValidateValidTest(unittest.TestCase):
         actions = [
             {"type": "play", "source": "chime.wav", "label": "提示音", "volume": 70, "loop": False},
             {"type": "tts", "text": "你好", "voice": "zh", "volume": 60},
+            {"type": "ai", "prompt": "用一句中文介绍一下自己", "system": "你是播报员", "model": "deepseek-chat", "volume": 60},
             {"type": "volume", "level": 30},
             {"type": "connect", "address": "AA:BB:CC:DD:EE:FF"},
             {"type": "disconnect"},

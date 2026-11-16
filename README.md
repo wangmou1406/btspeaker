@@ -25,6 +25,8 @@
 | 命令行 | `btspeaker status / devices / play / say / rules / logs / diag` 等，ssh 下脚本化 |
 | 诊断 | Web `/api/diag`、`bt-diag.sh` 中文链路诊断、`journalctl -u btspeaker` 日志 |
 
+| AI 播报 | 规则动作调用 OpenAI 兼容大模型生成文本并 TTS 播报 |
+
 ## 界面预览
 
 | 总览 | 音箱 |

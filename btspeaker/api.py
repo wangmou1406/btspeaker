@@ -276,6 +276,7 @@ class Api:
                 "next_runs": engine_status.get("next_runs", []),
             },
             "tts": tts_probe,
+            "ai": self._ai_probe(),
             "last_event": state.get("last_event"),
         }
 
@@ -873,6 +874,13 @@ class Api:
         )
         tts_probe = self._tts_probe()
         add("TTS 语音播报", bool(tts_probe.get("ready")), "%s 后端" % tts_probe.get("backend", "none"), tts_probe.get("hint", ""))
+        ai_probe = self._ai_probe()
+        add(
+            "AI 播报",
+            bool(ai_probe.get("ready")),
+            "模型 %s" % ai_probe.get("model", "-"),
+            ai_probe.get("hint", ""),
+        )
 
         engine_status = self._engine_status()
         add(
@@ -893,6 +901,54 @@ class Api:
                 return {"backend": "none", "ready": False, "hint": "探测 TTS 失败: %s" % exc}
 
         return self._cached("tts_probe", 30.0, _factory)
+
+    # ------------------------------------------------------------------ #
+    # AI 播报
+    # ------------------------------------------------------------------ #
+    def _ai_probe(self) -> Dict[str, Any]:
+        def _factory() -> Dict[str, Any]:
+            ai = getattr(self.app, "ai", None)
+            if ai is None:
+                return {"ready": False, "backend": "none", "hint": "AI 未初始化"}
+            try:
+                result = ai.probe()
+                return result if isinstance(result, dict) else {}
+            except Exception as exc:
+                return {"ready": False, "backend": "none", "hint": "探测 AI 失败: %s" % exc}
+
+        return self._cached("ai_probe", 10.0, _factory)
+
+    def h_ai_get(self, params, body, query):
+        """返回 AI 配置探测结果（不暴露 API Key）。"""
+        return self._ai_probe()
+
+    def h_ai_chat(self, params, body, query):
+        """生成文本；可选 speak=true 直接通过 TTS + 音箱播报。"""
+        prompt = str((body or {}).get("prompt") or "").strip()
+        if not prompt:
+            raise ApiError("bad_request", "缺少 prompt（要问 AI 的内容）", 400)
+        system = str((body or {}).get("system") or "").strip() or None
+        model = str((body or {}).get("model") or "").strip() or None
+        ai = getattr(self.app, "ai", None)
+        if ai is None:
+            raise ApiError("ai_unavailable", "AI 未初始化", 503)
+        try:
+            text = ai.complete(prompt, system=system, model=model)
+        except Exception as exc:
+            raise ApiError("ai_error", "AI 调用失败：%s" % exc, 502)
+        result: Dict[str, Any] = {"text": text, "spoken": False, "tts_error": ""}
+        if parse_bool((body or {}).get("speak"), False):
+            try:
+                path = self.app.tts.synthesize(text)
+                play_req = PlayRequest(source=str(path), label=text[:60])
+                played = self.app.player.play(play_req)
+                if bool(getattr(played, "ok", False)):
+                    result["spoken"] = True
+                else:
+                    result["tts_error"] = str(getattr(played, "error", "") or "播放失败")
+            except Exception as exc:
+                result["tts_error"] = str(exc)
+        return result
 
     # ------------------------------------------------------------------ #
     # 外部触发（webhook / 浏览器一键）
@@ -945,6 +1001,8 @@ _ROUTES = _compile_routes(
         ("POST", r"/api/player/stop", "player_stop"),
         ("POST", r"/api/player/volume", "player_volume"),
         ("POST", r"/api/tts/speak", "tts_speak"),
+        ("GET", r"/api/ai", "ai_get"),
+        ("POST", r"/api/ai/chat", "ai_chat"),
         ("GET", r"/api/rules", "rules_list"),
         ("POST", r"/api/rules", "rules_create"),
         ("GET", r"/api/rules/export", "rules_export"),

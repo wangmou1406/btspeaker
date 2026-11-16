@@ -279,6 +279,44 @@ class TemplateRenderTest(EngineTestCase):
         self.assertEqual(self.tts.texts[0], "保留{unknown_var}原样")
 
 
+class AIActionTest(EngineTestCase):
+    """AI 播报动作：大模型生成文本 → TTS → 播放。"""
+
+    def test_ai_action_generates_and_plays(self) -> None:
+        class FakeAI:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def complete(self, prompt, system=None, model=None):
+                self.calls.append({"prompt": prompt, "system": system, "model": model})
+                return "现在是下午三点，记得喝水。"
+
+        fake = FakeAI()
+        self.engine.ai = fake
+        rule = self.add_rule(
+            name="AI 测试",
+            actions=[{"type": "ai", "prompt": "现在是 {time}，提醒我喝水", "system": "你是播报员", "volume": 60}],
+        )
+        result = self.engine.execute_rule(rule, {"trigger": "manual", "job_id": "job_ai"})
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertEqual(1, len(fake.calls))
+        self.assertIn("提醒我喝水", fake.calls[0]["prompt"])
+        self.assertEqual("你是播报员", fake.calls[0]["system"])
+        self.assertEqual(1, len(self.tts.texts))
+        self.assertIn("记得喝水", self.tts.texts[0])
+        self.assertEqual(1, len(self.player.played))
+
+    def test_ai_action_missing_prompt(self) -> None:
+        from btspeaker.rules import normalize_rule
+
+        rule = normalize_rule(
+            {"id": "r_ai_empty", "name": "AI 空提示", "trigger": {"type": "manual"}, "actions": [{"type": "ai"}]}
+        )
+        result = self.engine.execute_rule(rule, {"trigger": "manual", "job_id": "job_ai2"})
+        self.assertFalse(result["ok"])
+        self.assertIn("prompt", result["error"])
+
+
 class CooldownAndConditionTest(EngineTestCase):
     def test_cooldown_rejects_second_execution(self):
         rule = self.add_rule(actions=[{"type": "log", "message": "冷却测试"}], cooldown=300)

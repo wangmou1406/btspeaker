@@ -398,3 +398,25 @@ Web 界面「自动化」页、`/api/rules` 接口、`POST /api/hooks/<rule_id>`
 - `GET /api/events`（等价于引擎 `recent()`）看失败原因与动作明细；
 - Web「日志」页 / `data_dir/btspeaker.log` 看详细中文日志；
 - `GET /api/diag` 检查 TTS、播放器、蓝牙、调度器是否就绪。
+
+## 动作
+
+### AI 播报（`ai`）
+
+调用 OpenAI 兼容的大模型接口生成文本，再走 TTS 播报。配置位于「设置 → AI 播报」（`ai.*`）。
+
+```json
+{
+  "type": "ai",
+  "prompt": "用一句简短的中文播报：今天是 {date}，{weekday}，现在 {time}。",
+  "system": "你是蓝音管家，回答要口语化，适合朗读",
+  "model": "deepseek-chat",
+  "volume": 80
+}
+```
+
+- `prompt`（必填）：提示词，支持 `{time}` `{date}` `{weekday}` `{bt_name}` 等模板变量；
+- `system` / `model`：可选，留空用全局 AI 设置；
+- 需要先在设置页填写 `ai.base_url`、`ai.api_key` 并打开「启用 AI」；
+- 生成失败不会中断后续动作，错误会写入规则执行结果与日志。
+

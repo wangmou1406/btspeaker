@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional
 from . import APP_TITLE, __version__
 from .api import ApiServer
 from .audio import Player
+from .ai import AIClient
 from .bluetooth import BluetoothMonitor, create_backend
 from .bus import EV_SYSTEM_BOOT, EV_SYSTEM_SHUTDOWN, EventBus
 from .config import Config
@@ -136,6 +137,7 @@ class App:
         self.player = Player(self.cfg, self.bus)
         self.player.set_address_provider(self._current_bt_address)
         self.tts = TtsEngine(self.cfg)
+        self.ai = AIClient(self.cfg)
         self.rules = RuleStore(self.cfg.rules_path)
         self.engine = AutomationEngine(
             self.cfg,
@@ -146,6 +148,7 @@ class App:
             self.rules,
             self.state,
             persist=self.store,
+            ai=self.ai,
         )
         self.monitor = BluetoothMonitor(self.cfg, self.bt, self.bus, self.state)
         self.api = ApiServer(self)

@@ -27,6 +27,7 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 from urllib import request as urlrequest
 
 from . import bus as bus_events
+from .ai import AIClient
 from .rules import WEEKDAY_CN, evaluate_conditions
 from .scheduler import Scheduler
 from .util import clamp_int, get_logger, hostname, iso_now, new_id, parse_bool, render_template, run_cmd
@@ -60,10 +61,12 @@ def _clip(text: Any, limit: int = 120) -> str:
 class AutomationEngine:
     """规则自动化引擎（线程安全）。"""
 
-    def __init__(self, cfg, bus, player, tts, bt, rules, state, persist=None, logger=None):
+    def __init__(self, cfg, bus, player, tts, bt, rules, state, persist=None, logger=None, ai=None):
         self.cfg, self.bus, self.player, self.tts, self.bt = cfg, bus, player, tts, bt
         self.rules, self.state, self.persist = rules, state, persist
         self.logger = logger or get_logger("engine")
+        # AI 播报客户端：默认由配置构造，测试可注入假实现
+        self.ai = ai if ai is not None else AIClient(cfg, self.logger)
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self._queue = queue.Queue(maxsize=MAX_QUEUE_SIZE)  # type: queue.Queue
@@ -388,6 +391,7 @@ class AutomationEngine:
             "http": lambda: self._act_http(action, ctx),
             "wait": lambda: self._act_wait(action),
             "log": lambda: self._act_log(action, ctx, rule),
+            "ai": lambda: self._act_ai(action, ctx, rule),
         }
         handler = handlers.get(atype)
         if handler is None:
@@ -437,6 +441,41 @@ class AutomationEngine:
         if not bool(getattr(result, "ok", False)):
             return False, "TTS 播放失败：%s" % (str(getattr(result, "error", "") or "") or "未知错误")
         return True, "已播报：%s" % _clip(text, 40)
+
+    def _act_ai(self, action: dict, ctx: Dict[str, Any], rule: dict) -> Tuple[bool, str]:
+        """AI 播报：大模型生成文本 → TTS 合成 → 播放。"""
+        prompt = self._render(action.get("prompt"), ctx).strip()
+        if not prompt:
+            return False, "ai 动作缺少 prompt"
+        if self.ai is None:  # pragma: no cover - 理论上不会为 None
+            return False, "AI 未初始化"
+        system = self._render(action.get("system"), ctx).strip() or None
+        model = str(action.get("model") or "").strip() or None
+        try:
+            text = self.ai.complete(prompt, system=system, model=model)
+        except Exception as exc:
+            return False, "AI 调用失败：%s" % exc
+        text = str(text or "").strip()
+        if not text:
+            return False, "AI 返回了空文本"
+        if self.tts is None:
+            return False, "AI 已生成文本，但 TTS 未配置，无法播报"
+        voice = str(action.get("voice") or "").strip() or None
+        try:
+            path = self.tts.synthesize(text, voice)
+        except Exception as exc:
+            return False, "AI 语音合成失败：%s" % exc
+        request = self._make_play_request(
+            source=str(path), label=_clip(text, 60), volume=self._opt_volume(action.get("volume")),
+            loop=False, address=None, rule_id=str(rule.get("id") or ""),
+        )
+        try:
+            result = self.player.play(request)
+        except Exception as exc:
+            return False, "AI 播报播放失败：%s" % exc
+        if not bool(getattr(result, "ok", False)):
+            return False, "AI 播报播放失败：%s" % (str(getattr(result, "error", "") or "") or "未知错误")
+        return True, "AI 播报：%s" % _clip(text, 60)
 
     def _act_volume(self, action: dict) -> Tuple[bool, str]:
         try:
