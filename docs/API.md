@@ -253,7 +253,7 @@ HTTP 4xx / 5xx，同时返回：
       },
       "player": {
         "backend": "auto", "volume": 70,
-        "alsa_device": "bluealsa:HCI={hci},DEV={mac},PROFILE=a2dp",
+        "alsa_device": "bluealsa:DEV={mac},PROFILE=a2dp",
         "mpg123": "mpg123", "aplay": "aplay", "ffmpeg": "ffmpeg",
         "max_duration": 900, "loop_gap": 1, "volume_command": ""
       },

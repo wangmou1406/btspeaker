@@ -32,7 +32,7 @@ from btspeaker.util import CmdResult
 from tests.helpers import EventRecorder, make_config, temp_data_dir, wait_until
 
 MAC = "AA:BB:CC:11:22:33"
-PCM = "bluealsa:HCI=hci0,DEV=%s,PROFILE=a2dp" % MAC
+PCM = "bluealsa:DEV=%s,PROFILE=a2dp" % MAC
 
 
 def write_wav(path, seconds=0.05, rate=8000, amplitude=1000, channels=1, width=2):
@@ -254,7 +254,7 @@ class ProbeTest(_PlayerCase):
 
     def test_render_alsa_device(self) -> None:
         cfg, player, _bus, _rec = self.make_mock()
-        default_pcm = "bluealsa:HCI=hci0,DEV=AA:BB:CC:11:22:33,PROFILE=a2dp"
+        default_pcm = "bluealsa:DEV=AA:BB:CC:11:22:33,PROFILE=a2dp"
         self.assertEqual(default_pcm, player._render_alsa_device("aa:bb:cc:11:22:33"))
         self.assertEqual(default_pcm, player._render_alsa_device("AA:BB:CC:11:22:33"))
         cfg.set("bluetooth.adapter", "hci5")

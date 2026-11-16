@@ -134,6 +134,7 @@ class App:
         )
         self.bt = create_backend(self.cfg)
         self.player = Player(self.cfg, self.bus)
+        self.player.set_address_provider(self._current_bt_address)
         self.tts = TtsEngine(self.cfg)
         self.rules = RuleStore(self.cfg.rules_path)
         self.engine = AutomationEngine(
@@ -155,6 +156,18 @@ class App:
             self.cfg.get("player.backend", "auto"),
             int(self.rules.counts().get("total", 0)),
         )
+
+    # ------------------------------------------------------------------ #
+    def _current_bt_address(self) -> str:
+        """当前已连接的蓝牙设备地址（供播放器在 address=None 时兜底）。"""
+        try:
+            devices = self.bt.list_devices()
+        except Exception:  # pragma: no cover - 防御性
+            return ""
+        for dev in devices:
+            if getattr(dev, "connected", False):
+                return str(getattr(dev, "address", "") or "")
+        return ""
 
     # ------------------------------------------------------------------ #
     def _remember_event(self, event: str, payload: Dict[str, Any]) -> None:
@@ -182,6 +195,10 @@ class App:
         # 先同步建立一次蓝牙基线，保证首屏 /api/status 就有适配器/设备数据
         try:
             self.monitor.poll_once(publish=False)
+            connected = self._current_bt_address()
+            if connected:
+                self.player.note_connected_address(connected)
+                self.logger.info("启动时已有蓝牙设备连接：%s，已同步给播放器", connected)
         except Exception:
             self.logger.debug("首次蓝牙轮询失败", exc_info=True)
         self.monitor.start()

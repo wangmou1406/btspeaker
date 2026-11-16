@@ -64,7 +64,7 @@ cfg.web_dir, cfg.sounds_dirs(), cfg.sim_devices_path, cfg.is_sim(), cfg.ensure_d
   "bluetooth": {"backend": "cli", "cli": "bluetoothctl", "adapter": "hci0", "poll_interval": 5,
                 "scan_timeout": 12, "auto_reconnect": true, "default_device": "", "trust_on_connect": true},
   "player": {"backend": "auto", "volume": 70,
-             "alsa_device": "bluealsa:HCI={hci},DEV={mac},PROFILE=a2dp",
+             "alsa_device": "bluealsa:DEV={mac},PROFILE=a2dp",
              "mpg123": "mpg123", "aplay": "aplay", "ffmpeg": "ffmpeg",
              "max_duration": 900, "loop_gap": 1, "volume_command": ""},
   "tts": {"backend": "auto", "url": "", "method": "GET", "headers": {}, "body_template": "",

@@ -54,7 +54,7 @@ aplay -D bluealsa:HCI=hci0,DEV=<MAC>,PROFILE=a2dp /usr/share/btspeaker/sounds/ch
 | 音箱没连接（只是配对） | 页面「音箱」页点「连接」，或 `btspeaker connect <MAC>` |
 | 默认音箱不是当前连的那台 | 页面「设为默认」，或 `btspeaker default <MAC>` |
 | 音量太低 / 被静音 | `btspeaker volume 70`；规则「深夜自动静音」可能已把音量降到 15 |
-| ALSA 设备模板与实际不符 | 修改 `/etc/btspeaker/config.json` 的 `player.alsa_device`（默认 `bluealsa:HCI={hci},DEV={mac},PROFILE=a2dp`） |
+| ALSA 设备模板与实际不符 | 修改 `/etc/btspeaker/config.json` 的 `player.alsa_device`（默认 `bluealsa:DEV={mac},PROFILE=a2dp`；BlueALSA 4.x 不接受 HCI 参数） |
 | 音箱输入源没切到蓝牙 | 在音箱上切到蓝牙输入，或重新连接 |
 | bluealsa 未运行 | 见 [第 3 节](#3-bluealsa-未启动--没有-bluealsa-pcm) |
 | 格式不受支持 | mp3 装 `mpg123`；其它格式装 `ffmpeg`；或改用 wav |

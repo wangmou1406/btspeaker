@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 import wave
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Callable
 
 from .bluetooth import normalize_address
 from .bus import (
@@ -94,6 +94,8 @@ class Player:
         self._volume = _clamp_volume(cfg.get("player.volume", 70))
         # 记录「当前已连接音箱」，作为 address=None 时的默认目标
         self._bt_address = ""
+        # 兜底地址来源：服务启动时设备已经连着、没收到 connected 事件时使用
+        self._address_provider: Optional[Callable[[], str]] = None
         self._bus_tokens: List[str] = []
         if bus is not None:
             try:
@@ -128,6 +130,16 @@ class Player:
                 self._bt_address = address
             elif event == EV_BT_DISCONNECTED and self._bt_address == address:
                 self._bt_address = ""
+
+    def note_connected_address(self, address: str) -> None:
+        """外部同步「当前已连接设备」地址（服务启动/轮询时调用）。"""
+        value = normalize_address(address)
+        with self._state_lock:
+            self._bt_address = value
+
+    def set_address_provider(self, provider: Optional[Callable[[], str]]) -> None:
+        """注册当前已连接设备地址的查询回调，避免错过连接事件时无法播放。"""
+        self._address_provider = provider
 
     # -- 工具探测 ------------------------------------------------------ #
     def _is_mock(self) -> bool:
@@ -479,6 +491,11 @@ class Player:
             return value
         with self._state_lock:
             tracked = self._bt_address
+        if not tracked and self._address_provider is not None:
+            try:
+                tracked = normalize_address(self._address_provider() or "")
+            except Exception:  # pragma: no cover - 防御性
+                tracked = ""
         return tracked or normalize_address(self.cfg.get("bluetooth.default_device", ""))
 
     def _hci(self) -> str:
@@ -487,7 +504,7 @@ class Player:
     def _render_alsa_device(self, address: str) -> str:
         """渲染 bluealsa PCM 设备串：{mac} 用大写 MAC，{hci} 用适配器名。"""
         template = str(self.cfg.get("player.alsa_device", "")
-                       or "bluealsa:HCI={hci},DEV={mac},PROFILE=a2dp")
+                       or "bluealsa:DEV={mac},PROFILE=a2dp")
         mac = normalize_address(address).upper() if address else ""
         # 用 str.replace 而非 format：避免模板里蓝色 ALSA 参数中的花括号冲突
         return template.replace("{mac}", mac).replace("{hci}", self._hci())

@@ -2744,7 +2744,7 @@
               return '<option value="' + item[0] + '"' + ((player.backend || 'auto') === item[0] ? ' selected' : '') + '>' + item[1] + '</option>';
             }).join('') + '</select></label>' +
             '<label class="field"><span>默认音量 0-100</span><input id="set-player-volume" type="number" min="0" max="100" value="' + escAttr(player.volume != null ? player.volume : 70) + '"></label>' +
-            '<label class="field full"><span>ALSA 设备模板</span><input id="set-player-alsa" type="text" class="mono" value="' + escAttr(player.alsa_device || 'bluealsa:HCI={hci},DEV={mac},PROFILE=a2dp') + '"></label>' +
+            '<label class="field full"><span>ALSA 设备模板</span><input id="set-player-alsa" type="text" class="mono" value="' + escAttr(player.alsa_device || 'bluealsa:DEV={mac},PROFILE=a2dp') + '"></label>' +
             '<label class="field"><span>最长播放秒数</span><input id="set-player-max-duration" type="number" min="5" max="86400" value="' + escAttr(player.max_duration != null ? player.max_duration : 900) + '"></label>' +
             '<label class="field"><span>循环间隙（秒）</span><input id="set-player-loop-gap" type="number" min="0" max="60" value="' + escAttr(player.loop_gap != null ? player.loop_gap : 1) + '"></label>' +
             '<label class="field full"><span>硬件音量命令（可选）</span><input id="set-player-volume-command" type="text" value="' + escAttr(player.volume_command || '') + '" placeholder="留空表示不调用"></label>' +
