@@ -1567,7 +1567,7 @@
     var path = kind === 'connect' ? '/api/bluetooth/connect' : '/api/bluetooth/disconnect';
     var verb = kind === 'connect' ? '已连接' : '已断开';
     return busy(btn, function () {
-      return api(path, { method: 'POST', body: { address: address }, timeout: 35000 }).then(function () {
+      return api(path, { method: 'POST', body: { address: address }, timeout: 90000 }).then(function () {
         return afterDeviceChange();
       }).then(function () {
         toast(verb + (name ? '「' + name + '」' : ''));

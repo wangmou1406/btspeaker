@@ -471,13 +471,48 @@ class CliBackend(BluetoothBackend):
                 self.trust(normalized)  # 信任失败不阻断连接
             except BluetoothError:
                 pass
-        ok = self._result_ok(
-            self._run(["connect", normalized], timeout=40.0),
-            tolerated=("alreadyconnected", "already connected"),
-        )
-        if ok:
+        # 未配对设备先配对：小米等音箱必须先完成配对（链路密钥）才能连接，
+        # 否则底层会直接 page timeout，报"设备无响应"。
+        if not self._is_paired(normalized):
+            pair_result = self._run(["pair", normalized], timeout=30.0)
+            pair_ok = self._result_ok(
+                pair_result,
+                tolerated=("alreadyexists", "already paired", "already exists"),
+            )
+            if not pair_ok:
+                self._raise_connection_failure(pair_result, "配对")
+        result = self._run(["connect", normalized], timeout=40.0)
+        if self._result_ok(result, tolerated=("alreadyconnected", "already connected")):
             self.logger.info("蓝牙已连接：%s", normalized)
-        return ok
+            return True
+        self._raise_connection_failure(result, "连接")
+        return False
+
+    def _is_paired(self, address: str) -> bool:
+        """查询设备是否已经配对（Bluetooth 键信息是否存在）。"""
+        try:
+            result = self._run(["info", address], timeout=15.0)
+        except Exception:  # pragma: no cover - 防御性
+            return False
+        text = ((result.stdout or "") + "\n" + (result.stderr or "")).lower()
+        return "paired: yes" in text or "bonded: yes" in text
+
+    def _raise_connection_failure(self, result: Any, action: str) -> None:
+        """连接/配对失败时抛出带中文排查提示的 BluetoothError。"""
+        text = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+        low = text.lower()
+        no_response_markers = (
+            "page-timeout", "page timeout", "status 0x04", "connect failed",
+            "connectionattemptfailed", "br-connection-busy",
+        )
+        if any(marker in low for marker in no_response_markers):
+            raise BluetoothError(
+                "音箱无响应（page timeout）。请依次确认："
+                "①音箱已开机并长按蓝牙键进入配对模式（指示灯快闪/语音提示）；"
+                "②音箱没有连接手机或其它设备（先在手机上忽略/关闭蓝牙）；"
+                "③音箱靠近路由器后重试。原始信息：%s" % (text[:120] or "无")
+            )
+        raise BluetoothError("%s失败：%s" % (action, text[:120] or "未知原因"))
 
     def disconnect(self, address: str) -> bool:
         normalized = self._require_address(address)

@@ -376,6 +376,52 @@ class CliBackendTest(_TempDirCase):
         self.assertTrue(info["powered"])
         self.assertTrue(info["discovering"])
 
+    def _fake_runner(self, paired_text, pair_text="Pairing successful\n",
+                     connect_text="Connection successful\n", connect_code=0):
+        calls = []
+
+        def fake_run(argv, timeout=20.0, env=None, input_text=None, cwd=None):
+            args = [str(item) for item in argv[1:]]
+            calls.append(args)
+            if args[:1] == ["trust"]:
+                return CmdResult(returncode=0, stdout="trust succeeded", argv=args)
+            if args[:1] == ["info"]:
+                return CmdResult(returncode=0, stdout=paired_text, argv=args)
+            if args[:1] == ["pair"]:
+                code = 0 if pair_text.lower().find("failed") < 0 else 1
+                return CmdResult(returncode=code, stdout=pair_text, argv=args)
+            if args[:1] == ["connect"]:
+                return CmdResult(returncode=connect_code, stdout=connect_text, argv=args)
+            return CmdResult(returncode=0, stdout="", argv=args)
+
+        return fake_run, calls
+
+    def test_connect_auto_pairs_unpaired_device(self) -> None:
+        backend = self._make()
+        fake_run, calls = self._fake_runner(
+            "Device AA:BB:CC:11:22:33\n\tPaired: no\n\tConnected: no\n"
+        )
+        with mock.patch.object(backend, "_tool_path", return_value="/usr/bin/bluetoothctl"):
+            with mock.patch("btspeaker.bluetooth.run_cmd", side_effect=fake_run):
+                self.assertTrue(backend.connect("aa:bb:cc:11:22:33"))
+        self.assertTrue(any(call[:2] == ["pair", ADC] for call in calls))
+        self.assertTrue(any(call[:2] == ["connect", ADC] for call in calls))
+
+    def test_connect_page_timeout_raises_hint(self) -> None:
+        backend = self._make()
+        fake_run, _calls = self._fake_runner(
+            "Device AA:BB:CC:11:22:33\n\tPaired: yes\n\tConnected: no\n",
+            connect_text="Failed to connect: org.bluez.Error.Failed br-connection-page-timeout\n",
+            connect_code=1,
+        )
+        with mock.patch.object(backend, "_tool_path", return_value="/usr/bin/bluetoothctl"):
+            with mock.patch("btspeaker.bluetooth.run_cmd", side_effect=fake_run):
+                with self.assertRaises(BluetoothError) as ctx:
+                    backend.connect(ADC)
+        message = str(ctx.exception)
+        self.assertIn("配对模式", message)
+        self.assertIn("page timeout", message.lower())
+
     def test_scan_unsupported_detection_and_fallback(self) -> None:
         self.assertTrue(CliBackend._scan_unsupported("Unknown option --timeout"))
         self.assertTrue(CliBackend._scan_unsupported("unrecognized option '--timeout'"))
